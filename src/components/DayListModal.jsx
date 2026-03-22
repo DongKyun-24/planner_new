@@ -1,0 +1,508 @@
+import { useEffect, useMemo, useRef, useState } from "react"
+
+function getMentionContext(value, caret) {
+  if (caret < 0) return null
+  const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1
+  const linePrefix = value.slice(lineStart, caret)
+  const atOffset = linePrefix.lastIndexOf("@")
+  if (atOffset === -1) return null
+
+  const anchorPos = lineStart + atOffset
+  const beforeChar = anchorPos > 0 ? value[anchorPos - 1] : ""
+  if (beforeChar && beforeChar !== ";" && !/\s/.test(beforeChar)) return null
+
+  const query = value.slice(anchorPos + 1, caret)
+  if (/[\s;@]/.test(query)) return null
+
+  let tokenEnd = anchorPos + 1
+  while (tokenEnd < value.length) {
+    const ch = value[tokenEnd]
+    if (ch === ";" || /\s/.test(ch) || ch === "@") break
+    tokenEnd += 1
+  }
+  if (tokenEnd < caret) return null
+
+  return { anchorPos, tokenEnd, query }
+}
+
+function buildMentionMatches(editableWindows, query) {
+  const q = String(query ?? "").trim().toLowerCase()
+  if (!q) return editableWindows
+  return editableWindows.filter((w) => String(w?.title ?? "").toLowerCase().includes(q))
+}
+
+export default function DayListModal({
+  open,
+  onClose,
+  readOnly = false,
+  ui,
+  highlightTokens,
+  dayListTitle,
+  isToday = false,
+  dayListMode,
+  setDayListMode,
+  dayListEditText,
+  setDayListEditText,
+  applyDayListEdit,
+  dayListReadItems,
+  memoFontPx,
+  editableWindows = []
+}) {
+  const textareaRef = useRef(null)
+  const mentionOptionRefs = useRef(new Map())
+  const backdropPressStartedRef = useRef(false)
+  const [mentionState, setMentionState] = useState({
+    visible: false,
+    query: "",
+    anchorPos: -1,
+    tokenEnd: -1
+  })
+  const [mentionHoverId, setMentionHoverId] = useState(null)
+
+  const effectiveMode = readOnly ? "read" : dayListMode
+  const mentionMatches = useMemo(
+    () => buildMentionMatches(editableWindows, mentionState.query),
+    [editableWindows, mentionState.query]
+  )
+  const readIsAll = Boolean(dayListReadItems?.isAll)
+  const readOrderedItems = useMemo(() => {
+    if (Array.isArray(dayListReadItems?.orderedItems)) {
+      return dayListReadItems.orderedItems
+        .map((item) => ({
+          time: String(item?.time ?? "").trim(),
+          text: String(item?.text ?? "").trim(),
+          title: String(item?.title ?? "").trim()
+        }))
+        .filter((item) => item.text)
+    }
+
+    const timed = Array.isArray(dayListReadItems?.timedItems) ? dayListReadItems.timedItems : []
+    const noTime = Array.isArray(dayListReadItems?.noTimeItems) ? dayListReadItems.noTimeItems : []
+    const ordered = []
+
+    for (const item of timed) {
+      if (item && typeof item === "object") {
+        ordered.push({
+          time: String(item.time ?? "").trim(),
+          text: String(item.text ?? "").trim(),
+          title: String(item.title ?? "").trim()
+        })
+      } else {
+        ordered.push({ time: "", text: String(item ?? "").trim(), title: "" })
+      }
+    }
+    for (const item of noTime) {
+      if (item && typeof item === "object") {
+        ordered.push({
+          time: "",
+          text: String(item.text ?? "").trim(),
+          title: String(item.title ?? "").trim()
+        })
+      } else {
+        ordered.push({ time: "", text: String(item ?? "").trim(), title: "" })
+      }
+    }
+    return ordered.filter((item) => item.text)
+  }, [dayListReadItems])
+
+  function hideMentionMenu() {
+    setMentionState((prev) =>
+      prev.visible || prev.query || prev.anchorPos !== -1 || prev.tokenEnd !== -1
+        ? { visible: false, query: "", anchorPos: -1, tokenEnd: -1 }
+        : prev
+    )
+  }
+
+  function refreshMentionMenu() {
+    if (readOnly || effectiveMode !== "edit") {
+      hideMentionMenu()
+      return
+    }
+    const ta = textareaRef.current
+    if (!ta) return
+    if (document.activeElement !== ta || ta.selectionStart !== ta.selectionEnd) {
+      hideMentionMenu()
+      return
+    }
+
+    const value = ta.value ?? ""
+    const caret = ta.selectionStart ?? 0
+    const context = getMentionContext(value, caret)
+    if (!context) {
+      hideMentionMenu()
+      return
+    }
+
+    const nextMatches = buildMentionMatches(editableWindows, context.query)
+    if (nextMatches.length === 0) {
+      hideMentionMenu()
+      return
+    }
+
+    setMentionState({
+      visible: true,
+      query: context.query,
+      anchorPos: context.anchorPos,
+      tokenEnd: context.tokenEnd
+    })
+    setMentionHoverId((prev) => (nextMatches.some((item) => item.id === prev) ? prev : nextMatches[0]?.id ?? null))
+  }
+
+  function updateDayListText(nextText) {
+    setDayListEditText(nextText)
+    applyDayListEdit(nextText)
+  }
+
+  function scrollMentionOptionIntoView(optionId) {
+    if (!optionId) return
+    const target = mentionOptionRefs.current.get(optionId)
+    if (!target) return
+    target.scrollIntoView({ block: "nearest" })
+  }
+
+  function handleMentionPick(title) {
+    const ta = textareaRef.current
+    if (!ta) return
+    const value = ta.value ?? ""
+    const caret = ta.selectionStart ?? 0
+    const context =
+      getMentionContext(value, caret) ??
+      (mentionState.anchorPos >= 0 && mentionState.tokenEnd >= mentionState.anchorPos
+        ? { anchorPos: mentionState.anchorPos, tokenEnd: mentionState.tokenEnd }
+        : null)
+    if (!context) return
+
+    // Only replace the full token when it is already a category mention like "@title;...".
+    // If the user inserted "@" in front of existing text, keep that trailing text intact.
+    const replaceFullToken = value[context.tokenEnd] === ";"
+    const replaceEnd = replaceFullToken
+      ? Math.max(context.tokenEnd, context.anchorPos + 1)
+      : Math.max(caret, context.anchorPos + 1)
+    const nextChar = value[replaceEnd] ?? ""
+    const insert = `@${title}${nextChar === ";" ? "" : ";"}`
+    const nextText = value.slice(0, context.anchorPos) + insert + value.slice(replaceEnd)
+    const nextCaret = context.anchorPos + insert.length
+
+    updateDayListText(nextText)
+    hideMentionMenu()
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(nextCaret, nextCaret)
+      refreshMentionMenu()
+    })
+  }
+
+  useEffect(() => {
+    if (!open || effectiveMode !== "edit") {
+      const rafId = requestAnimationFrame(() => {
+        hideMentionMenu()
+      })
+      return () => cancelAnimationFrame(rafId)
+    }
+  }, [open, effectiveMode])
+
+  useEffect(() => {
+    if (!mentionState.visible || !mentionHoverId) return
+    const rafId = requestAnimationFrame(() => {
+      scrollMentionOptionIntoView(mentionHoverId)
+    })
+    return () => cancelAnimationFrame(rafId)
+  }, [mentionState.visible, mentionHoverId])
+
+  if (!open) return null
+
+  return (
+    <div
+      onPointerDown={(e) => {
+        backdropPressStartedRef.current = e.target === e.currentTarget
+      }}
+      onPointerUp={(e) => {
+        const shouldClose = backdropPressStartedRef.current && e.target === e.currentTarget
+        backdropPressStartedRef.current = false
+        if (shouldClose) onClose()
+      }}
+      onPointerCancel={() => {
+        backdropPressStartedRef.current = false
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.35)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+        zIndex: 200
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(520px, 92vw)",
+          maxHeight: "80vh",
+          background: ui.surface,
+          color: ui.text,
+          borderRadius: 12,
+          border: `1px solid ${ui.border}`,
+          boxShadow: ui.shadow,
+          padding: 14,
+          display: "flex",
+          flexDirection: "column",
+          gap: 10
+        }}
+        >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <div
+              style={{
+                fontWeight: 900,
+                display: "inline-flex",
+                alignItems: "center",
+                lineHeight: 1.1
+              }}
+            >
+              {dayListTitle}
+            </div>
+            {isToday ? (
+              <span
+                style={{
+                  minHeight: 24,
+                  padding: "0 8px",
+                  borderRadius: 999,
+                  fontSize: 11,
+                  fontWeight: 900,
+                  lineHeight: 1,
+                  color: highlightTokens?.today?.pillText ?? ui.accent,
+                  border: `1px solid ${highlightTokens?.today?.pillText ?? ui.accent}`,
+                  background: highlightTokens?.today?.soft ?? ui.surface2,
+                  flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxSizing: "border-box"
+                }}
+              >
+                Today
+              </span>
+            ) : null}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setDayListMode("read")}
+              style={{
+                height: 28,
+                padding: "0 10px",
+                borderRadius: 8,
+                border: `1px solid ${ui.border}`,
+                background: effectiveMode === "read" ? ui.accent : ui.surface,
+                color: effectiveMode === "read" ? "#fff" : ui.text,
+                cursor: "pointer",
+                fontWeight: 800
+              }}
+            >
+              Read
+            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDayListMode("edit")}
+                style={{
+                  height: 28,
+                  padding: "0 10px",
+                  borderRadius: 8,
+                  border: `1px solid ${ui.border}`,
+                  background: effectiveMode === "edit" ? ui.accent : ui.surface,
+                  color: effectiveMode === "edit" ? "#fff" : ui.text,
+                  cursor: "pointer",
+                  fontWeight: 800
+                }}
+              >
+                Edit
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                height: 28,
+                padding: "0 10px",
+                borderRadius: 8,
+                border: `1px solid ${ui.border}`,
+                background: ui.surface2,
+                color: ui.text,
+                cursor: "pointer",
+                fontWeight: 800
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        {effectiveMode === "edit" ? (
+          <div style={{ position: "relative", marginTop: 10 }}>
+            <textarea
+              ref={textareaRef}
+              value={dayListEditText}
+              onFocus={refreshMentionMenu}
+              onChange={(e) => {
+                const next = e.target.value
+                updateDayListText(next)
+                requestAnimationFrame(refreshMentionMenu)
+              }}
+              onClick={refreshMentionMenu}
+              onSelect={refreshMentionMenu}
+              onKeyUp={refreshMentionMenu}
+              onBlur={hideMentionMenu}
+              onKeyDown={(e) => {
+                if (!mentionState.visible || mentionMatches.length === 0) return
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault()
+                  setMentionHoverId((prev) => {
+                    const currentIndex = mentionMatches.findIndex((item) => item.id === prev)
+                    const delta = e.key === "ArrowDown" ? 1 : -1
+                    const baseIndex = currentIndex >= 0 ? currentIndex : delta > 0 ? -1 : 0
+                    const nextIndex = (baseIndex + delta + mentionMatches.length) % mentionMatches.length
+                    return mentionMatches[nextIndex]?.id ?? null
+                  })
+                  return
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault()
+                  const target =
+                    mentionMatches.find((item) => item.id === mentionHoverId) ?? mentionMatches[0]
+                  if (target) handleMentionPick(target.title)
+                  return
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault()
+                  hideMentionMenu()
+                }
+              }}
+              placeholder="Type your schedule notes"
+              style={{
+                width: "100%",
+                minHeight: 260,
+                maxHeight: "60vh",
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: `1px solid ${ui.border2}`,
+                background: ui.surface2,
+                color: ui.text,
+                fontSize: 13,
+                lineHeight: 1.6,
+                fontFamily: "inherit",
+                fontWeight: 600,
+                resize: "vertical"
+              }}
+            />
+            {mentionState.visible && mentionMatches.length > 0 ? (
+              <div
+                style={{
+                  position: "absolute",
+                  right: 12,
+                  top: 12,
+                  minWidth: 120,
+                  maxHeight: 170,
+                  overflowY: "auto",
+                  borderRadius: 8,
+                  border: `1px solid ${ui.border}`,
+                  background: ui.surface,
+                  boxShadow: ui.shadow,
+                  zIndex: 4,
+                  display: "flex",
+                  flexDirection: "column"
+                }}
+              >
+                {mentionMatches.map((w) => (
+                  <button
+                    key={w.id}
+                    ref={(el) => {
+                      if (el) mentionOptionRefs.current.set(w.id, el)
+                      else mentionOptionRefs.current.delete(w.id)
+                    }}
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      handleMentionPick(w.title)
+                    }}
+                    onMouseEnter={() => setMentionHoverId(w.id)}
+                    style={{
+                      height: 30,
+                      padding: "0 10px",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      color: ui.text,
+                      fontWeight: 700,
+                      border: mentionHoverId === w.id ? `2px solid ${ui.accent}` : "2px solid transparent",
+                      background: mentionHoverId === w.id ? ui.surface2 : "transparent",
+                      boxSizing: "border-box"
+                    }}
+                  >
+                    {w.title}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div
+            onClick={() => {
+              if (!readOnly) setDayListMode("edit")
+            }}
+            style={{
+              marginTop: 10,
+              width: "100%",
+              minHeight: 260,
+              maxHeight: "60vh",
+              padding: "12px",
+              borderRadius: 10,
+              border: `1px solid ${ui.border}`,
+              background: ui.surface,
+              color: ui.text,
+              fontSize: memoFontPx,
+              lineHeight: 1.25,
+              fontFamily: "inherit",
+              fontWeight: 400,
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+              cursor: readOnly ? "default" : "text"
+            }}
+          >
+            {readIsAll ? (
+              <>
+                {readOrderedItems.map((item, idx) => (
+                  <div key={`daylist-all-${idx}`} style={{ color: ui.text, lineHeight: 1.25 }}>
+                    {item.time ? `${item.time} ` : ""}
+                    {item.title ? `[${item.title}] ` : ""}
+                    {item.text}
+                  </div>
+                ))}
+                {readOrderedItems.length === 0 && (
+                  <div style={{ color: ui.text2 }}>No content.</div>
+                )}
+              </>
+            ) : (
+              <>
+                {readOrderedItems.map((item, idx) => (
+                  <div key={`daylist-tab-${idx}`} style={{ color: ui.text, lineHeight: 1.25 }}>
+                    {item.time ? `${item.time} ` : ""}
+                    {item.text}
+                  </div>
+                ))}
+                {readOrderedItems.length === 0 && (
+                  <div style={{ color: ui.text2 }}>No content.</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
