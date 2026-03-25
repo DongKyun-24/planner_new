@@ -1,5 +1,6 @@
 import { buildHeaderLine } from "./holiday"
 import { buildLineStartPositions, keyToTime, keyToYMD } from "./dateUtils"
+import { stripTaskSuffix } from "./taskMarkers"
 
 export const groupLineRegex = /^\s*@(.+)\(([^)]*)\)\s*$/
 export const groupLineStartRegex = /^\s*@(.+)\s*\(\s*$/
@@ -267,11 +268,18 @@ export function parseDashboardBlockContent(body) {
     const semicolon = parseDashboardSemicolonLine(trimmed)
     if (semicolon) {
       if (semicolon.group) {
-        addGroupItem(groupIndex, groups, semicolon.group, { text: semicolon.text, time: semicolon.time, order })
+        const taskAware = stripTaskSuffix(semicolon.text)
+        addGroupItem(groupIndex, groups, semicolon.group, {
+          text: taskAware.text,
+          time: semicolon.time,
+          order
+        })
       } else if (semicolon.time) {
-        timed.push({ time: semicolon.time, text: semicolon.text, order })
+        const taskAware = stripTaskSuffix(semicolon.text)
+        timed.push({ time: semicolon.time, text: taskAware.text, order })
       } else {
-        general.push(semicolon.text)
+        const taskAware = stripTaskSuffix(semicolon.text)
+        general.push(taskAware.text)
       }
       order++
       continue
@@ -290,8 +298,9 @@ export function parseDashboardBlockContent(body) {
         .filter((x) => x !== "")
       for (const item of items) {
         const parsed = parseTimePrefix(item)
+        const taskAware = stripTaskSuffix(parsed ? parsed.text : item)
         addGroupItem(groupIndex, groups, title, {
-          text: parsed ? parsed.text : item,
+          text: taskAware.text,
           time: parsed ? parsed.time : "",
           order
         })
@@ -302,12 +311,14 @@ export function parseDashboardBlockContent(body) {
 
     const timeLine = parseTimePrefix(trimmed)
     if (timeLine) {
-      timed.push({ time: timeLine.time, text: timeLine.text, order })
+      const taskAware = stripTaskSuffix(timeLine.text)
+      timed.push({ time: timeLine.time, text: taskAware.text, order })
       order++
       continue
     }
 
-    general.push(trimmed)
+    const taskAware = stripTaskSuffix(trimmed)
+    general.push(taskAware.text)
     order++
   }
   return { general, groups, timed }
@@ -325,7 +336,8 @@ export function buildOrderedEntriesFromBody(bodyText) {
 
     const semicolon = parseDashboardSemicolonLine(trimmed)
     if (semicolon) {
-      const text = String(semicolon.text ?? "").trim()
+      const taskAware = stripTaskSuffix(semicolon.text)
+      const text = String(taskAware.text ?? "").trim()
       if (!text) continue
       entries.push({
         time: semicolon.time || "",
@@ -350,7 +362,8 @@ export function buildOrderedEntriesFromBody(bodyText) {
         .filter((x) => x !== "")
       for (const item of items) {
         const parsed = parseTimePrefix(item)
-        const text = String(parsed ? parsed.text : item).trim()
+        const taskAware = stripTaskSuffix(parsed ? parsed.text : item)
+        const text = String(taskAware.text ?? "").trim()
         if (!text) continue
         entries.push({
           time: parsed ? parsed.time : "",
@@ -365,14 +378,16 @@ export function buildOrderedEntriesFromBody(bodyText) {
 
     const timeLine = parseTimePrefix(trimmed)
     if (timeLine) {
-      const text = String(timeLine.text ?? "").trim()
+      const taskAware = stripTaskSuffix(timeLine.text)
+      const text = String(taskAware.text ?? "").trim()
       if (!text) continue
       entries.push({ time: timeLine.time || "", text, title: "", order })
       order++
       continue
     }
 
-    entries.push({ time: "", text: trimmed, title: "", order })
+    const taskAware = stripTaskSuffix(trimmed)
+    entries.push({ time: "", text: taskAware.text, title: "", order })
     order++
   }
 

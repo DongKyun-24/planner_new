@@ -1,6 +1,8 @@
 import { dayOfWeek } from "../utils/dateUtils"
 import { getHolidayName } from "../utils/holiday"
 
+const TASK_RING_BLUE = "#3b82f6"
+
 export default function CalendarPanel({
   calendarPanelRef,
   calendarTopRef,
@@ -33,7 +35,8 @@ export default function CalendarPanel({
   openDayList,
   handleDayClick,
   calendarInteractingRef,
-  goToday
+  goToday,
+  onOpenAddPicker
 }) {
   function splitTimeLabel(value) {
     const raw = String(value ?? "").trim()
@@ -46,6 +49,7 @@ export default function CalendarPanel({
   const itemFontPx = Math.max(8, Number(calendarFontPx) || 10)
   const timeFontPx = Math.max(8, itemFontPx - 1)
   const dotSizePx = Math.max(5, Math.round(itemFontPx * 0.6))
+  const taskDotSizePx = Math.max(10, Math.round(itemFontPx * 1.05))
   const itemGapPx = Math.max(2, Math.round(itemFontPx * 0.3))
   const itemGroupGapPx = Math.max(2, Math.round(itemFontPx * 0.2))
   const dotOffsetPx = Math.max(1, Math.round(itemFontPx * 0.25))
@@ -224,6 +228,16 @@ export default function CalendarPanel({
               aria-label="오늘로 이동"
             >
               Today
+            </button>
+
+            <button
+              type="button"
+              onClick={(e) => onOpenAddPicker?.(e.currentTarget)}
+              style={{ ...pillButton, padding: "0 10px 2px", borderRadius: 12, lineHeight: 1 }}
+              title="일정 생성"
+              aria-label="일정 생성"
+            >
+              🗓 Add
             </button>
 
             <button
@@ -542,6 +556,7 @@ export default function CalendarPanel({
                   >
                     {items.map((it) => {
                       const timeInfo = splitTimeLabel(it.time)
+                      const isTask = Boolean(it?.isTask)
                       return (
                         <div
                           key={it.id}
@@ -552,20 +567,30 @@ export default function CalendarPanel({
                             minWidth: 0
                           }}
                         >
-                          {it.color && (
+                          {isTask || it.color ? (
                             <span
                               title={it.sourceTitle ? `[${it.sourceTitle}]` : "항목"}
                               style={{
-                                width: dotSizePx,
-                                height: dotSizePx,
+                                width: isTask ? taskDotSizePx : dotSizePx,
+                                height: isTask ? taskDotSizePx : dotSizePx,
                                 borderRadius: 999,
-                                background: it.color,
+                                border: isTask ? `1.25px solid ${it.completed ? ui.accent : TASK_RING_BLUE}` : "none",
+                                background: isTask ? (it.completed ? ui.accent : ui.surface) : it.color,
+                                color: isTask ? (it.completed ? "#fff" : "transparent") : "transparent",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                justifyContent: "center",
                                 flexShrink: 0,
                                 alignSelf: it.time ? "center" : "flex-start",
-                                marginTop: it.time ? 0 : dotOffsetPx
+                                marginTop: it.time ? 0 : dotOffsetPx,
+                                fontWeight: 900,
+                                fontSize: isTask ? Math.max(7, Math.round(taskDotSizePx * 0.5)) : 0,
+                                lineHeight: 1
                               }}
-                            />
-                          )}
+                            >
+                              {isTask ? "✓" : null}
+                            </span>
+                          ) : null}
                           {it.time ? (
                             <span
                               style={{
@@ -586,13 +611,15 @@ export default function CalendarPanel({
                           ) : null}
                           <span
                             style={{
-                              fontWeight: 650,
-                              alignSelf: timeInfo.end ? "center" : "flex-start",
+                              fontWeight: isTask ? 550 : 650,
+                              alignSelf: timeInfo.end || isTask ? "center" : "flex-start",
                               minWidth: 0,
                               lineHeight: 1.2,
                               whiteSpace: "normal",
                               overflowWrap: "anywhere",
-                              wordBreak: "break-word"
+                              wordBreak: "break-word",
+                              color: isTask && it.completed ? ui.text2 : ui.text,
+                              textDecoration: isTask && it.completed ? "line-through" : "none"
                             }}
                           >
                             {it.text}

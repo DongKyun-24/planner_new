@@ -1,9 +1,293 @@
+import { formatDateRangeLabel, getRepeatLabel, parseRecurringRawLine } from "../utils/recurringRules"
+
+const TASK_RING_BLUE = "#3b82f6"
+const DDAY_ACCENT = "#f59e0b"
+const TASK_CONTROL_SIZE = 18
+const TASK_ROW_GAP = 6
+const TASK_ROW_PADDING = "3px 0"
+const REGULAR_TASK_TEXT_OFFSET = 4
+const REPEAT_META_TEXT_STYLE = {
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 20,
+  fontSize: 11,
+  color: "inherit",
+  fontWeight: 700,
+  lineHeight: 1,
+  flexShrink: 0
+}
+const TASK_TEXT_STYLE = {
+  minWidth: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  minHeight: 20,
+  fontWeight: 500,
+  lineHeight: 1.15
+}
+const REPEAT_BADGE_STYLE = {
+  height: 18,
+  padding: "0 7px",
+  borderRadius: 999,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 10,
+  fontWeight: 800,
+  lineHeight: 1,
+  flexShrink: 0
+}
+
+function getTaskControlSize(memoFontPx = 13) {
+  return Math.max(15, Math.min(20, Math.round(memoFontPx + 1)))
+}
+
+function getTaskCheckFontSize(controlSize) {
+  return Math.max(8, Math.min(10, Math.round(controlSize * 0.52)))
+}
+
+function DdayRow({ item, ui, onOpen }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation()
+        onOpen?.(item)
+      }}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        border: "none",
+        background: "transparent",
+        color: ui.text,
+        borderRadius: 0,
+        padding: "3px 0",
+        display: "flex",
+        alignItems: "center",
+        gap: 7,
+        cursor: "pointer"
+      }}
+    >
+      <span
+        style={{
+          minHeight: 20,
+          padding: "0 8px",
+          borderRadius: 999,
+          background: "#fff7ed",
+          color: DDAY_ACCENT,
+          border: "1px solid rgba(245, 158, 11, 0.26)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 11,
+          fontWeight: 900,
+          lineHeight: 1,
+          flexShrink: 0
+        }}
+      >
+        {item.ddayLabel}
+      </span>
+      <span
+        style={{
+          fontSize: 11,
+          color: ui.text2,
+          fontWeight: 800,
+          lineHeight: 1,
+          flexShrink: 0
+        }}
+      >
+        {item.shortDateLabel}
+      </span>
+      <span
+        style={{
+          minWidth: 0,
+          fontWeight: 700,
+          lineHeight: 1.2,
+          whiteSpace: "normal",
+          overflowWrap: "anywhere",
+          wordBreak: "break-word"
+        }}
+      >
+        {item.display}
+      </span>
+    </button>
+  )
+}
+
+function TaskCard({ item, ui, memoFontPx, onTaskToggle, onTaskOpen }) {
+  const repeatLabel =
+    item?.sourceType === "recurring" ? getRepeatLabel(item?.repeat, item?.repeatInterval) : ""
+  const controlSize = getTaskControlSize(memoFontPx)
+  const checkFontSize = getTaskCheckFontSize(controlSize)
+  return (
+    <div
+      onClick={(e) => {
+        e.stopPropagation()
+        onTaskOpen?.(item)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          e.stopPropagation()
+          onTaskOpen?.(item)
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      style={{
+        padding: TASK_ROW_PADDING,
+        display: "flex",
+        alignItems: "center",
+        gap: TASK_ROW_GAP,
+        cursor: "pointer",
+        outline: "none",
+        boxShadow: "none"
+      }}
+    >
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onTaskToggle?.(item)
+        }}
+        style={{
+          width: controlSize,
+          height: controlSize,
+          borderRadius: 999,
+          border: `1.25px solid ${item.completed ? ui.accent : TASK_RING_BLUE}`,
+          background: item.completed ? ui.accent : ui.surface,
+          color: item.completed ? "#fff" : "transparent",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          cursor: "pointer",
+          fontWeight: 900,
+          fontSize: checkFontSize,
+          lineHeight: 1,
+          padding: 0,
+          alignSelf: "center",
+          margin: 0
+        }}
+      >
+        ✓
+      </button>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          minHeight: 20,
+          minWidth: 0,
+          lineHeight: 1.15
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: TASK_ROW_GAP,
+            minWidth: 0,
+            flexWrap: "nowrap",
+            paddingLeft: repeatLabel ? 0 : REGULAR_TASK_TEXT_OFFSET
+          }}
+        >
+          {repeatLabel ? (
+            <span
+              style={{
+                ...REPEAT_BADGE_STYLE,
+                border: `1px solid ${ui.border}`,
+                background: ui.surface2,
+                color: ui.text2
+              }}
+            >
+              {repeatLabel}
+            </span>
+          ) : null}
+          <span
+            style={{
+              ...TASK_TEXT_STYLE,
+              fontSize: memoFontPx,
+              color: item.completed ? ui.text2 : ui.text,
+              textDecoration: item.completed ? "line-through" : "none"
+            }}
+          >
+            {item.display}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RecurringScheduleLine({ item, ui, memoFontPx, onOpen }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation()
+        onOpen?.(item)
+      }}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        border: "none",
+        outline: "none",
+        boxShadow: "none",
+        background: "transparent",
+        color: ui.text,
+        borderRadius: 0,
+        padding: TASK_ROW_PADDING,
+        display: "flex",
+        alignItems: "center",
+        gap: 5,
+        flexWrap: "nowrap",
+        cursor: "pointer",
+        marginLeft: -2
+      }}
+    >
+      <span
+        style={{
+          ...REPEAT_BADGE_STYLE,
+          border: `1px solid ${ui.border}`,
+          background: ui.surface2,
+          color: ui.text2
+        }}
+      >
+        {item.repeatLabel}
+      </span>
+      <span
+        style={{
+          ...REPEAT_META_TEXT_STYLE,
+          color: ui.text2,
+          fontWeight: 600
+        }}
+      >
+        {item.dateLabel}
+      </span>
+      <span
+        style={{
+          minWidth: 0,
+          display: "inline-flex",
+          alignItems: "center",
+          minHeight: 20,
+          color: ui.text,
+          fontSize: memoFontPx,
+          fontWeight: 400,
+          lineHeight: 1.25
+        }}
+      >
+        {item.display}
+      </span>
+    </button>
+  )
+}
+
 export default function MemoReadView({
   blocks,
   isAll,
   ui,
   highlightTokens,
   todayKey,
+  todayDdayItems = [],
   hoveredReadDateKey,
   setHoveredReadDateKey,
   collapsedForActive,
@@ -14,7 +298,14 @@ export default function MemoReadView({
   setReadBlockRef,
   handleReadBlockClick,
   readScrollMarginTop,
-  emptyText = "읽기모드입니다. 클릭하여 편집하세요."
+  recurringItemsByDate = {},
+  taskItemsByDate = {},
+  memoFontPx = 13,
+  onTaskToggle,
+  onTaskOpen,
+  onRecurringOpen,
+  onDdayOpen,
+  emptyText = "빈 메모입니다. 날짜를 눌러 편집해보세요."
 }) {
   if (!blocks || blocks.length === 0) {
     return (
@@ -42,6 +333,25 @@ export default function MemoReadView({
 
         let hasContent = false
         let orderedItems = []
+        const ddayItems = isToday
+          ? (Array.isArray(todayDdayItems) ? todayDdayItems : []).filter((item) => String(item?.display ?? "").trim())
+          : []
+        const taskItems = (Array.isArray(taskItemsByDate?.[block.dateKey]) ? taskItemsByDate[block.dateKey] : [])
+          .filter((item) => String(item?.display ?? "").trim())
+        const regularTaskItems = taskItems.filter((item) => item?.sourceType !== "recurring")
+        const recurringTaskItems = taskItems.filter((item) => item?.sourceType === "recurring")
+        const recurringItems = (Array.isArray(recurringItemsByDate?.[block.dateKey]) ? recurringItemsByDate[block.dateKey] : [])
+          .map((item) => {
+            const parsed = parseRecurringRawLine(item?.rawLine, item?.title ?? "")
+            if (parsed.isTask) return null
+            return {
+              ...item,
+              display: parsed.display || item?.display || "",
+              repeatLabel: getRepeatLabel(item?.repeat, item?.repeatInterval),
+              dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.familyUntilDateKey)
+            }
+          })
+          .filter((item) => item?.display)
         const useOrderedEntries = isAll && Array.isArray(block.entries)
         const blockGeneral = Array.isArray(block.general) ? block.general : []
         const blockGroups = Array.isArray(block.groups) ? block.groups : []
@@ -70,13 +380,12 @@ export default function MemoReadView({
                 for (const item of group.items ?? []) {
                   const text = (item.text ?? "").trim()
                   if (!text) continue
-                  const entry = {
+                  orderedItems.push({
                     time: item.time || "",
                     text,
                     title: group.title,
                     order: item.order ?? 0
-                  }
-                  orderedItems.push(entry)
+                  })
                 }
               }
               for (const item of blockTimed) {
@@ -103,6 +412,8 @@ export default function MemoReadView({
           hasContent = orderedItems.length > 0
         }
 
+        hasContent =
+          hasContent || recurringItems.length > 0 || regularTaskItems.length > 0 || recurringTaskItems.length > 0 || ddayItems.length > 0
         if (!hasContent && !forceVisible) return null
 
         return (
@@ -156,13 +467,7 @@ export default function MemoReadView({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    lineHeight: 1.1
-                  }}
-                >
+                <div style={{ display: "inline-flex", alignItems: "center", lineHeight: 1.1 }}>
                   {header}
                 </div>
                 {isToday && (
@@ -206,21 +511,99 @@ export default function MemoReadView({
                 }}
                 title={isCollapsed ? "펼치기" : "접기"}
               >
-                {isCollapsed ? "▸" : "▾"}
+                {isCollapsed ? "▾" : "▴"}
               </button>
             </div>
             {!isCollapsed && (
-              <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 2 }}>
-                {orderedItems.map((item, idx) => (
-                  <div
-                    key={`${block.dateKey}-${activeWindowId ?? "tab"}-item-${idx}`}
-                    style={{ fontWeight: 400, color: ui.text, lineHeight: 1.25 }}
-                  >
-                    {item.time ? `${item.time} ` : ""}
-                    {isAll && item.title ? `[${item.title}] ` : ""}
-                    {item.text}
+              <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+                {ddayItems.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 2 }}>
+                    {ddayItems.map((item) => (
+                      <DdayRow key={`today-dday-${item.id}`} item={item} ui={ui} onOpen={onDdayOpen} />
+                    ))}
                   </div>
-                ))}
+                ) : null}
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  {orderedItems.map((item, idx) => (
+                    <div
+                      key={`${block.dateKey}-${activeWindowId ?? "tab"}-item-${idx}`}
+                      style={{ fontWeight: 400, color: ui.text, lineHeight: 1.25, fontSize: memoFontPx }}
+                    >
+                      {item.time ? `${item.time} ` : ""}
+                      {isAll && item.title ? `[${item.title}] ` : ""}
+                      {item.text}
+                    </div>
+                  ))}
+                </div>
+                {recurringItems.length > 0 ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      paddingTop: orderedItems.length > 0 ? 4 : 0,
+                      borderTop: orderedItems.length > 0 ? `1px dashed ${ui.border}` : "none"
+                    }}
+                  >
+                    {recurringItems.map((item) => (
+                      <RecurringScheduleLine
+                        key={`${block.dateKey}-recurring-${item.id}`}
+                        item={item}
+                        ui={ui}
+                        memoFontPx={memoFontPx}
+                        onOpen={onRecurringOpen}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {regularTaskItems.length > 0 ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      paddingTop: orderedItems.length > 0 || recurringItems.length > 0 ? 4 : 0,
+                      borderTop: orderedItems.length > 0 || recurringItems.length > 0 ? `1px dashed ${ui.border}` : "none"
+                    }}
+                  >
+                    {regularTaskItems.map((item) => (
+                      <TaskCard
+                        key={`${block.dateKey}-task-${item.id}`}
+                        item={item}
+                        ui={ui}
+                        memoFontPx={memoFontPx}
+                        onTaskToggle={onTaskToggle}
+                        onTaskOpen={onTaskOpen}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {recurringTaskItems.length > 0 ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      paddingTop:
+                        orderedItems.length > 0 || recurringItems.length > 0 || regularTaskItems.length > 0 ? 4 : 0,
+                      borderTop:
+                        orderedItems.length > 0 || recurringItems.length > 0 || regularTaskItems.length > 0
+                          ? `1px dashed ${ui.border}`
+                          : "none"
+                    }}
+                  >
+                    {recurringTaskItems.map((item) => (
+                      <TaskCard
+                        key={`${block.dateKey}-recurring-task-${item.id}`}
+                        item={item}
+                        ui={ui}
+                        memoFontPx={memoFontPx}
+                        onTaskToggle={onTaskToggle}
+                        onTaskOpen={onTaskOpen}
+                      />
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>

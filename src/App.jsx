@@ -5,8 +5,10 @@ import DeleteConfirmModal from "./components/DeleteConfirmModal"
 import FilterPanel from "./components/FilterPanel"
 import MemoEditor from "./components/MemoEditor"
 import MemoReadView from "./components/MemoReadView"
+import RecurringRuleModal from "./components/RecurringRuleModal"
 import RightMemoEditor from "./components/RightMemoEditor"
 import SettingsPanel from "./components/SettingsPanel"
+import TasksPanel from "./components/TasksPanel"
 import WindowTabs from "./components/WindowTabs"
 import { isSupabaseConfigured, supabase } from "./lib/supabase"
 import { themes } from "./styles/themes"
@@ -52,6 +54,22 @@ import {
   removeEmptyBlockByDateKey,
   removeAllEmptyBlocks
 } from "./utils/plannerText"
+import {
+  buildRecurringByDate,
+  genRecurringId,
+  getPreviousDateKey,
+  normalizeRepeatDays,
+  normalizeRepeatInterval,
+  normalizeRepeatType,
+  parseRecurringRawLine
+} from "./utils/recurringRules"
+import {
+  extractUpcomingDdaysFromPlannerText,
+  formatDdayDateLabel,
+  getDdayLabel
+} from "./utils/ddays"
+import { extractTasksFromPlannerText, updateTaskLineStatusInBody } from "./utils/tasks"
+import { parseDdaySuffix, parseTaskSuffix, removeTaskLinesFromBody, stripTaskSuffix } from "./utils/taskMarkers"
 
 const CATEGORY_ID_MAP = {}
 const GENERAL_CATEGORY_ID = "__general__"
@@ -72,6 +90,10 @@ function normalizeWindowTitleValue(value) {
 
 const CLIENT_ID_KEY = "planner-client-id"
 const REMEMBER_CREDENTIALS_KEY = "planner-remember-credentials"
+const OFFLINE_RECURRING_RULES_KEY = "planner-recurring-rules-offline-v1"
+const OFFLINE_RECURRING_OVERRIDES_KEY = "planner-recurring-overrides-offline-v1"
+const USER_RECURRING_RULES_KEY_PREFIX = "planner-recurring-rules-user-v1"
+const USER_RECURRING_OVERRIDES_KEY_PREFIX = "planner-recurring-overrides-user-v1"
 
 function getClientId() {
   if (typeof window === "undefined") return "server"
@@ -125,6 +147,33 @@ function App() {
 
   function getMemoStoragePrefix(userId) {
     return userId ? `${USER_MEMO_PREFIX}-${userId}` : OFFLINE_MEMO_PREFIX
+  }
+
+  function getRecurringRulesStorageKey(userId) {
+    return userId ? `${USER_RECURRING_RULES_KEY_PREFIX}-${userId}` : OFFLINE_RECURRING_RULES_KEY
+  }
+
+  function getRecurringOverridesStorageKey(userId) {
+    return userId ? `${USER_RECURRING_OVERRIDES_KEY_PREFIX}-${userId}` : OFFLINE_RECURRING_OVERRIDES_KEY
+  }
+
+  function loadRecurringList(storageKey) {
+    try {
+      const raw = localStorage.getItem(storageKey)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
+  function saveRecurringList(storageKey, value) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(Array.isArray(value) ? value : []))
+    } catch (err) {
+      void err
+    }
   }
 
   function getMemoKey(prefix, year, windowId) {
@@ -308,6 +357,18 @@ function App() {
   const dayListEditGuardRef = useRef({ open: false, mode: "read", dirty: false })
   const sortOrderSupportedRef = useRef(true)
   const sortOrderSyncTimerRef = useRef(null)
+  const recurringRulesStorageKey = useMemo(
+    () => getRecurringRulesStorageKey(session?.user?.id ?? null),
+    [session?.user?.id]
+  )
+  const recurringOverridesStorageKey = useMemo(
+    () => getRecurringOverridesStorageKey(session?.user?.id ?? null),
+    [session?.user?.id]
+  )
+  const [recurringRules, setRecurringRules] = useState(() => loadRecurringList(OFFLINE_RECURRING_RULES_KEY))
+  const [recurringOverrides, setRecurringOverrides] = useState(() => loadRecurringList(OFFLINE_RECURRING_OVERRIDES_KEY))
+  const [recurringModalState, setRecurringModalState] = useState(null)
+  const [tasksOpen, setTasksOpen] = useState(false)
 
   const [text, setText] = useState("")
   const [today, setToday] = useState(() => new Date())
@@ -471,6 +532,9 @@ function App() {
 
         const semicolon = parseDashboardSemicolonLine(trimmed)
         if (semicolon) {
+          const taskAware = stripTaskSuffix(semicolon.text)
+          const content = String(taskAware.text ?? "").trim()
+          if (!content) continue
           const categoryId = semicolon.group ? normalizeCategoryId(semicolon.group) : GENERAL_CATEGORY_ID
           const timeFields = normalizePlanTimeFields({ time: semicolon.time || "" })
           const key = buildPlanKey({
@@ -478,7 +542,7 @@ function App() {
             time: timeFields.time,
             end_time: timeFields.end_time,
             category_id: categoryId,
-            content: semicolon.text
+            content
           })
           if (!map.has(key)) map.set(key, order)
           order++
@@ -498,7 +562,8 @@ function App() {
             .filter((x) => x !== "")
           for (const item of items) {
             const parsedItem = parseTimePrefix(item)
-            const text = parsedItem ? parsedItem.text : item
+            const taskAware = stripTaskSuffix(parsedItem ? parsedItem.text : item)
+            const text = String(taskAware.text ?? "").trim()
             if (!text) continue
             const timeFields = normalizePlanTimeFields({ time: parsedItem ? parsedItem.time : "" })
             const key = buildPlanKey({
@@ -516,24 +581,30 @@ function App() {
 
         const timeLine = parseTimePrefix(trimmed)
         if (timeLine) {
+          const taskAware = stripTaskSuffix(timeLine.text)
+          const text = String(taskAware.text ?? "").trim()
+          if (!text) continue
           const timeFields = normalizePlanTimeFields({ time: timeLine.time || "" })
           const key = buildPlanKey({
             date: block.dateKey,
             time: timeFields.time,
             end_time: timeFields.end_time,
             category_id: GENERAL_CATEGORY_ID,
-            content: timeLine.text
+            content: text
           })
           if (!map.has(key)) map.set(key, order)
           order++
           continue
         }
 
+        const taskAware = stripTaskSuffix(trimmed)
+        const content = String(taskAware.text ?? "").trim()
+        if (!content) continue
         const key = buildPlanKey({
           date: block.dateKey,
           time: "",
           category_id: GENERAL_CATEGORY_ID,
-          content: trimmed
+          content
         })
         if (!map.has(key)) map.set(key, order)
         order++
@@ -543,9 +614,92 @@ function App() {
     return map
   }
 
+  function buildDdayMarkerCountMapFromText(sourceText, year) {
+    const map = new Map()
+    const src = String(sourceText ?? "")
+    if (!src.trim()) return map
+
+    const parsed = parseBlocksAndItems(src, year, { allowAnyYear: true })
+    for (const block of parsed.blocks ?? []) {
+      const body = src.slice(block.bodyStartPos, block.blockEndPos)
+      const lines = body.replace(/\r\n/g, "\n").split("\n")
+
+      for (const rawLine of lines) {
+        const trimmed = String(rawLine ?? "").trim()
+        if (!trimmed) continue
+        if (parseTaskSuffix(trimmed)) continue
+
+        const parsedDday = parseDdaySuffix(trimmed)
+        if (!parsedDday) continue
+
+        const baseRaw = String(parsedDday.baseRaw ?? "").trim()
+        if (!baseRaw) continue
+
+        const semicolon = parseDashboardSemicolonLine(baseRaw)
+        if (semicolon) {
+          const content = String(semicolon.text ?? "").trim()
+          if (!content) continue
+          const categoryId = semicolon.group ? normalizeCategoryId(semicolon.group) : GENERAL_CATEGORY_ID
+          const timeFields = normalizePlanTimeFields({ time: semicolon.time || "" })
+          const key = buildPlanKey({
+            date: block.dateKey,
+            time: timeFields.time,
+            end_time: timeFields.end_time,
+            category_id: categoryId,
+            content
+          })
+          map.set(key, (map.get(key) ?? 0) + 1)
+          continue
+        }
+
+        const timeLine = parseTimePrefix(baseRaw)
+        if (timeLine) {
+          const content = String(timeLine.text ?? "").trim()
+          if (!content) continue
+          const timeFields = normalizePlanTimeFields({ time: timeLine.time || "" })
+          const key = buildPlanKey({
+            date: block.dateKey,
+            time: timeFields.time,
+            end_time: timeFields.end_time,
+            category_id: GENERAL_CATEGORY_ID,
+            content
+          })
+          map.set(key, (map.get(key) ?? 0) + 1)
+          continue
+        }
+
+        const key = buildPlanKey({
+          date: block.dateKey,
+          time: "",
+          category_id: GENERAL_CATEGORY_ID,
+          content: baseRaw
+        })
+        map.set(key, (map.get(key) ?? 0) + 1)
+      }
+    }
+
+    return map
+  }
+
   function buildTextFromPlans(plans, year, previousText = "") {
     const yearPrefix = `${year}-`
     const orderMap = buildPlanOrderMapFromText(previousText, year)
+    const ddayMarkerCounts = buildDdayMarkerCountMapFromText(previousText, year)
+    const taskLinesByDate = new Map()
+    const prevParsed = parseBlocksAndItems(previousText ?? "", year)
+    for (const block of prevParsed.blocks ?? []) {
+      const body = String(previousText ?? "").slice(block.bodyStartPos, block.blockEndPos)
+      const taskLines = body
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((line) => String(line ?? "").trim())
+        .filter((line) => {
+          if (!line) return false
+          return Boolean(parseTaskSuffix(line))
+        })
+      if (taskLines.length > 0) taskLinesByDate.set(block.dateKey, taskLines)
+    }
+
     const byDate = new Map()
     let rowIndex = 0
     for (const row of plans ?? []) {
@@ -585,7 +739,9 @@ function App() {
       byDate.set(dateKey, bucket)
     }
 
-    const sortedDates = [...byDate.keys()].sort((a, b) => keyToTime(a) - keyToTime(b))
+    const sortedDates = [...new Set([...byDate.keys(), ...taskLinesByDate.keys()])].sort(
+      (a, b) => keyToTime(a) - keyToTime(b)
+    )
     const blocks = sortedDates.map((dateKey) => {
       const { m, d } = keyToYMD(dateKey)
       const header = buildHeaderLine(year, m, d)
@@ -627,10 +783,31 @@ function App() {
         return (a.idx ?? 0) - (b.idx ?? 0)
       })
       const lines = items.map((item) => {
-        if (item.isGeneral) return item.timeLabel ? `${item.timeLabel};${item.content}` : item.content
-        return item.timeLabel ? `${item.timeLabel};@${item.category};${item.content}` : `@${item.category};${item.content}`
+        const baseLine = item.isGeneral
+          ? item.timeLabel
+            ? `${item.timeLabel};${item.content}`
+            : item.content
+          : item.timeLabel
+            ? `${item.timeLabel};@${item.category};${item.content}`
+            : `@${item.category};${item.content}`
+
+        const key = buildPlanKey({
+          date: dateKey,
+          time: item.time,
+          end_time: item.endTime,
+          category_id: item.categoryId,
+          content: item.content
+        })
+        const ddayCount = ddayMarkerCounts.get(key) ?? 0
+        if (ddayCount > 0) {
+          ddayMarkerCounts.set(key, ddayCount - 1)
+          return `${baseLine};D`
+        }
+        return baseLine
       })
-      return lines.length > 0 ? `${header}\n${lines.join("\n")}` : header
+      const taskLines = taskLinesByDate.get(dateKey) ?? []
+      const mergedLines = [...lines, ...taskLines]
+      return mergedLines.length > 0 ? `${header}\n${mergedLines.join("\n")}` : header
     })
     return blocks.join("\n\n").trimEnd()
   }
@@ -639,7 +816,12 @@ function App() {
     const out = []
     const parsed = parseBlocksAndItems(sourceText ?? "", year)
     for (const block of parsed.blocks) {
-      const body = (sourceText ?? "").slice(block.bodyStartPos, block.blockEndPos)
+      const body = (sourceText ?? "")
+        .slice(block.bodyStartPos, block.blockEndPos)
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .filter((line) => !parseTaskSuffix(String(line ?? "").trim()))
+        .join("\n")
       const entries = buildOrderedEntriesFromBody(body)
       for (const entry of entries) {
         const text = String(entry?.text ?? "").trim()
@@ -1067,7 +1249,12 @@ function App() {
 
   function extractPlansFromDayBody(bodyText, dateKey, scopedWindowTitle = null) {
     const out = []
-    const entries = buildOrderedEntriesFromBody(bodyText ?? "")
+    const filteredBody = String(bodyText ?? "")
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .filter((line) => !parseTaskSuffix(String(line ?? "").trim()))
+      .join("\n")
+    const entries = buildOrderedEntriesFromBody(filteredBody)
     const scopedTitle = scopedWindowTitle ? normalizeCategoryId(scopedWindowTitle) : null
 
     for (const entry of entries) {
@@ -1435,6 +1622,22 @@ function App() {
     }
     lastSessionIdRef.current = nextId
   }, [session?.user?.id])
+
+  useEffect(() => {
+    setRecurringRules(loadRecurringList(recurringRulesStorageKey))
+  }, [recurringRulesStorageKey])
+
+  useEffect(() => {
+    setRecurringOverrides(loadRecurringList(recurringOverridesStorageKey))
+  }, [recurringOverridesStorageKey])
+
+  useEffect(() => {
+    saveRecurringList(recurringRulesStorageKey, recurringRules)
+  }, [recurringRulesStorageKey, recurringRules])
+
+  useEffect(() => {
+    saveRecurringList(recurringOverridesStorageKey, recurringOverrides)
+  }, [recurringOverridesStorageKey, recurringOverrides])
 
   useEffect(() => {
     if (!supabase || !session?.user?.id) return
@@ -2363,7 +2566,7 @@ function parseTabEditItemsByDate(tabText, baseYear, title) {
     const out = {}
     for (const block of parsedTab.blocks) {
       const body = (tabText ?? "").slice(block.bodyStartPos, block.blockEndPos)
-      const normalizedBody = normalizeGroupLineNewlines(body)
+      const normalizedBody = normalizeGroupLineNewlines(removeTaskLinesFromBody(body))
       const lines = normalizedBody.split("\n")
       const items = []
       let order = 0
@@ -3108,11 +3311,227 @@ function stripEmptyGroupLines(bodyText) {
     }
     return set
   }, [activeWindowId, integratedFilters, windows])
+  const activeRecurringCategoryTitle = useMemo(() => {
+    if (activeWindowId === "all") return null
+    return String(windows.find((w) => w.id === activeWindowId)?.title ?? "").trim()
+  }, [activeWindowId, windows])
+  const recurringItemsByDate = useMemo(() => {
+    const rangeStartKey = `${baseYear}-01-01`
+    const rangeEndKey = `${baseYear}-12-31`
+    return buildRecurringByDate(
+      recurringRules,
+      recurringOverrides,
+      rangeStartKey,
+      rangeEndKey,
+      activeRecurringCategoryTitle || null
+    )
+  }, [baseYear, recurringRules, recurringOverrides, activeRecurringCategoryTitle])
+  const tasksSourceText = useMemo(() => {
+    if (activeWindowId === "all") return text
+    return tabEditText ?? ""
+  }, [activeWindowId, tabEditText, text])
+  const textDdayItems = useMemo(
+    () =>
+      extractUpcomingDdaysFromPlannerText(tasksSourceText, baseYear, todayKey, {
+        maxDays: 10,
+        allowedTitles: activeWindowId === "all" ? allowedDashboardGroupTitles : null
+      }),
+    [tasksSourceText, baseYear, todayKey, activeWindowId, allowedDashboardGroupTitles]
+  )
+  const textTasks = useMemo(() => extractTasksFromPlannerText(tasksSourceText, baseYear), [tasksSourceText, baseYear])
+  const textTasksByDate = useMemo(() => {
+    const map = {}
+    for (const task of Array.isArray(textTasks) ? textTasks : []) {
+      const dateKey = String(task?.dateKey ?? "").trim()
+      if (!dateKey) continue
+      ;(map[dateKey] ??= []).push({ ...task, sourceType: "text" })
+    }
+    for (const dateKey of Object.keys(map)) {
+      map[dateKey].sort((a, b) => (a?.lineIndex ?? 0) - (b?.lineIndex ?? 0))
+    }
+    return map
+  }, [textTasks])
+
+  const recurringDisplayByDate = useMemo(() => {
+    const recurringMap = {}
+    const recurringTaskMap = {}
+    for (const [dateKey, recurringItems] of Object.entries(recurringItemsByDate ?? {})) {
+      for (const item of Array.isArray(recurringItems) ? recurringItems : []) {
+        const parsed = parseRecurringRawLine(item?.rawLine, item?.title ?? "")
+        if (!parsed.text) continue
+        const baseItem = {
+          ...item,
+          display: parsed.display || item?.display || "",
+          text: parsed.text,
+          title: parsed.title || "",
+          time: parsed.time || "",
+          completed: Boolean(parsed.completed),
+          isTask: Boolean(parsed.isTask),
+          isDday: Boolean(parsed.dday),
+          baseRaw: parsed.baseRaw || String(item?.rawLine ?? "").trim(),
+          sourceType: "recurring"
+        }
+        if (baseItem.isTask) {
+          ;(recurringTaskMap[dateKey] ??= []).push(baseItem)
+        } else {
+          ;(recurringMap[dateKey] ??= []).push(baseItem)
+        }
+      }
+    }
+    for (const dateKey of Object.keys(recurringTaskMap)) {
+      recurringTaskMap[dateKey].sort((a, b) => {
+        const timeA = String(a?.time ?? "")
+        const timeB = String(b?.time ?? "")
+        if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+        if (timeA && !timeB) return -1
+        if (!timeA && timeB) return 1
+        const createdA = String(a?.createdAt ?? "")
+        const createdB = String(b?.createdAt ?? "")
+        if (createdA && createdB && createdA !== createdB) return createdA.localeCompare(createdB)
+        return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
+      })
+    }
+    return { recurringMap, recurringTaskMap }
+  }, [recurringItemsByDate])
+
+  const recurringDisplayItemsByDate = recurringDisplayByDate.recurringMap
+  const recurringTaskItemsByDate = recurringDisplayByDate.recurringTaskMap
+  const combinedTaskItemsByDate = useMemo(() => {
+    const map = {}
+    for (const [dateKey, items] of Object.entries(textTasksByDate ?? {})) {
+      map[dateKey] = [...items]
+    }
+    for (const [dateKey, items] of Object.entries(recurringTaskItemsByDate ?? {})) {
+      map[dateKey] = [...(map[dateKey] ?? []), ...items]
+      map[dateKey].sort((a, b) => {
+        const timeA = String(a?.time ?? "")
+        const timeB = String(b?.time ?? "")
+        if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+        if (timeA && !timeB) return -1
+        if (!timeA && timeB) return 1
+        if (a?.sourceType === "text" && b?.sourceType === "text") {
+          return (a?.lineIndex ?? 0) - (b?.lineIndex ?? 0)
+        }
+        if (a?.sourceType === "recurring" && b?.sourceType === "recurring") {
+          const createdA = String(a?.createdAt ?? "")
+          const createdB = String(b?.createdAt ?? "")
+          if (createdA && createdB && createdA !== createdB) return createdA.localeCompare(createdB)
+        }
+        return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
+      })
+    }
+    return map
+  }, [textTasksByDate, recurringTaskItemsByDate])
+
+  const allTaskItems = useMemo(
+    () =>
+      Object.values(combinedTaskItemsByDate ?? {})
+        .flat()
+        .sort((a, b) => {
+          const dateDiff = keyToTime(String(a?.dateKey ?? "")) - keyToTime(String(b?.dateKey ?? ""))
+          if (dateDiff !== 0) return dateDiff
+          const timeA = String(a?.time ?? "")
+          const timeB = String(b?.time ?? "")
+          if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+          if (timeA && !timeB) return -1
+          if (!timeA && timeB) return 1
+          return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
+        }),
+    [combinedTaskItemsByDate]
+  )
+  const recurringDdayItems = useMemo(() => {
+    const todayMs = keyToTime(String(todayKey ?? "").trim())
+    if (!Number.isFinite(todayMs)) return []
+
+    const byFamily = new Map()
+    for (const [dateKey, recurringItems] of Object.entries(recurringItemsByDate ?? {})) {
+      const dateMs = keyToTime(String(dateKey ?? "").trim())
+      if (!Number.isFinite(dateMs)) continue
+      const daysLeft = Math.round((dateMs - todayMs) / (24 * 60 * 60 * 1000))
+      if (daysLeft < 0 || daysLeft > 10) continue
+
+      for (const item of Array.isArray(recurringItems) ? recurringItems : []) {
+        const parsed = parseRecurringRawLine(item?.rawLine, item?.title ?? "")
+        if (!parsed.text || !parsed.dday) continue
+        if (activeWindowId === "all" && allowedDashboardGroupTitles && parsed.title && !allowedDashboardGroupTitles.has(parsed.title)) {
+          continue
+        }
+        if (parsed.isTask && parsed.completed) continue
+
+        const familyId = String(item?.familyId ?? item?.ruleId ?? item?.id ?? "").trim()
+        if (!familyId) continue
+
+        const candidate = {
+          id: `rec-dday-${familyId}-${dateKey}`,
+          ruleId: item?.ruleId,
+          familyId,
+          dateKey,
+          rawLine: item?.rawLine,
+          baseRaw: parsed.baseRaw,
+          completed: Boolean(parsed.completed),
+          isTask: Boolean(parsed.isTask),
+          isRecurring: true,
+          sourceType: "recurring",
+          time: parsed.time,
+          title: parsed.title,
+          text: parsed.text,
+          display: parsed.display,
+          daysLeft,
+          ddayLabel: getDdayLabel(daysLeft),
+          shortDateLabel: formatDdayDateLabel(dateKey)
+        }
+
+        const current = byFamily.get(familyId)
+        if (!current) {
+          byFamily.set(familyId, candidate)
+          continue
+        }
+        if ((candidate.daysLeft ?? 0) < (current.daysLeft ?? 0)) {
+          byFamily.set(familyId, candidate)
+          continue
+        }
+        if ((candidate.daysLeft ?? 0) === (current.daysLeft ?? 0)) {
+          const timeA = String(candidate.time ?? "")
+          const timeB = String(current.time ?? "")
+          if (timeA && (!timeB || timeA.localeCompare(timeB) < 0)) {
+            byFamily.set(familyId, candidate)
+          }
+        }
+      }
+    }
+
+    return [...byFamily.values()].sort((a, b) => {
+      const dayDiff = (a?.daysLeft ?? 0) - (b?.daysLeft ?? 0)
+      if (dayDiff !== 0) return dayDiff
+      const timeA = String(a?.time ?? "")
+      const timeB = String(b?.time ?? "")
+      if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+      if (timeA && !timeB) return -1
+      if (!timeA && timeB) return 1
+      return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
+    })
+  }, [recurringItemsByDate, todayKey, activeWindowId, allowedDashboardGroupTitles])
+  const todayDdayItems = useMemo(
+    () =>
+      [...(Array.isArray(textDdayItems) ? textDdayItems : []), ...(Array.isArray(recurringDdayItems) ? recurringDdayItems : [])].sort(
+        (a, b) => {
+          const dayDiff = (a?.daysLeft ?? 0) - (b?.daysLeft ?? 0)
+          if (dayDiff !== 0) return dayDiff
+          const timeA = String(a?.time ?? "")
+          const timeB = String(b?.time ?? "")
+          if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+          if (timeA && !timeB) return -1
+          if (!timeA && timeB) return 1
+          return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
+        }
+      ),
+    [textDdayItems, recurringDdayItems]
+  )
 
   const dashboardByDate = useMemo(() => {
     const map = {}
     for (const block of dashboardBlocksSource) {
-      const body = dashboardSourceText.slice(block.bodyStartPos, block.blockEndPos)
+      const body = removeTaskLinesFromBody(dashboardSourceText.slice(block.bodyStartPos, block.blockEndPos))
       const parsedBlock = parseDashboardBlockContent(body)
       const entries = buildOrderedEntriesFromBody(body)
       const filteredGroups = allowedDashboardGroupTitles
@@ -3165,9 +3584,53 @@ function stripEmptyGroupLines(bodyText) {
         forceVisible: true
       })
     }
+    if (activeWindowId === "all") {
+      if (todayDdayItems.length > 0 && !out.some((block) => block.dateKey === todayKey)) {
+        out.push({
+          dateKey: todayKey,
+          general: [],
+          groups: [],
+          timed: [],
+          entries: [],
+          forceVisible: true
+        })
+      }
+      for (const dateKey of Object.keys(recurringDisplayItemsByDate ?? {})) {
+        if (out.some((block) => block.dateKey === dateKey)) continue
+        out.push({
+          dateKey,
+          general: [],
+          groups: [],
+          timed: [],
+          entries: [],
+          forceVisible: true
+        })
+      }
+      for (const dateKey of Object.keys(combinedTaskItemsByDate ?? {})) {
+        if (out.some((block) => block.dateKey === dateKey)) continue
+        out.push({
+          dateKey,
+          general: [],
+          groups: [],
+          timed: [],
+          entries: [],
+          forceVisible: true
+        })
+      }
+    }
     out.sort((a, b) => keyToTime(a.dateKey) - keyToTime(b.dateKey))
     return out
-  }, [activeReadDateDraftKey, activeWindowId, dashboardBlocksSource, dashboardByDate, windowTitleRank])
+  }, [
+    activeReadDateDraftKey,
+    activeWindowId,
+    dashboardBlocksSource,
+    dashboardByDate,
+    windowTitleRank,
+    todayDdayItems,
+    todayKey,
+    recurringDisplayItemsByDate,
+    combinedTaskItemsByDate
+  ])
 
   function buildTabEditTextForTitle(title) {
     if (!title) return ""
@@ -3225,9 +3688,30 @@ function stripEmptyGroupLines(bodyText) {
     if (activeReadDateDraftKey && !out.some((block) => block.dateKey === activeReadDateDraftKey)) {
       out.push({ dateKey: activeReadDateDraftKey, items: [], forceVisible: true })
     }
+    if (todayDdayItems.length > 0 && !out.some((block) => block.dateKey === todayKey)) {
+      out.push({ dateKey: todayKey, items: [], forceVisible: true })
+    }
+    for (const dateKey of Object.keys(recurringDisplayItemsByDate ?? {})) {
+      if (out.some((block) => block.dateKey === dateKey)) continue
+      out.push({ dateKey, items: [], forceVisible: true })
+    }
+    for (const dateKey of Object.keys(combinedTaskItemsByDate ?? {})) {
+      if (out.some((block) => block.dateKey === dateKey)) continue
+      out.push({ dateKey, items: [], forceVisible: true })
+    }
     out.sort((a, b) => keyToTime(a.dateKey) - keyToTime(b.dateKey))
     return out
-  }, [activeReadDateDraftKey, activeWindowId, baseYear, tabEditText, windows])
+  }, [
+    activeReadDateDraftKey,
+    activeWindowId,
+    baseYear,
+    tabEditText,
+    todayDdayItems,
+    todayKey,
+    windows,
+    recurringDisplayItemsByDate,
+    combinedTaskItemsByDate
+  ])
 
   useEffect(() => {
     if (activeWindowId === "all") return
@@ -3277,6 +3761,44 @@ function stripEmptyGroupLines(bodyText) {
         })
         if (bucket.length > 0) out[block.dateKey] = bucket
       }
+      for (const [dateKey, recurringItems] of Object.entries(recurringDisplayItemsByDate ?? {})) {
+        const bucket = (Array.isArray(recurringItems) ? recurringItems : [])
+          .map((item, idx) => {
+            const text = String(item?.text ?? "").trim()
+            if (!text) return null
+            const title = String(item?.title ?? "").trim()
+            const color = title ? windowColorByTitle.get(title) || "#999" : "#999"
+            return {
+              id: `${dateKey}-rec-${item.id}-${idx}`,
+              time: item?.time ? String(item.time).trim() : "",
+              text,
+              color,
+              sourceTitle: title
+            }
+          })
+          .filter(Boolean)
+        if (bucket.length > 0) out[dateKey] = (out[dateKey] ?? []).concat(bucket)
+      }
+    for (const [dateKey, taskItems] of Object.entries(combinedTaskItemsByDate ?? {})) {
+      const bucket = (Array.isArray(taskItems) ? taskItems : [])
+        .map((task, idx) => {
+          const text = String(task?.text ?? task?.display ?? "").trim()
+          if (!text) return null
+          const title = String(task?.title ?? "").trim()
+          if (allowedDashboardGroupTitles && title && !allowedDashboardGroupTitles.has(title)) return null
+          return {
+            id: `${dateKey}-task-${task.id}-${idx}`,
+            time: task?.time ? String(task.time).trim() : "",
+            text,
+            color: task?.completed ? "#2563eb" : "#cbd5e1",
+            sourceTitle: title,
+            isTask: true,
+            completed: Boolean(task?.completed)
+          }
+        })
+        .filter(Boolean)
+      if (bucket.length > 0) out[dateKey] = (out[dateKey] ?? []).concat(bucket)
+      }
       return out
     }
 
@@ -3302,6 +3824,40 @@ function stripEmptyGroupLines(bodyText) {
         .filter(Boolean)
       out[key] = (out[key] ?? []).concat(bucket)
     }
+    for (const [dateKey, recurringItems] of Object.entries(recurringDisplayItemsByDate ?? {})) {
+      const bucket = (Array.isArray(recurringItems) ? recurringItems : [])
+        .map((item, idx) => {
+          const text = String(item?.text ?? "").trim()
+          if (!text) return null
+          return {
+            id: `${dateKey}-rec-${targetWindow.id}-${idx}`,
+            time: item?.time ? String(item.time).trim() : "",
+            text,
+            color: targetWindow.color,
+            sourceTitle: targetWindow.title
+          }
+        })
+        .filter(Boolean)
+      if (bucket.length > 0) out[dateKey] = (out[dateKey] ?? []).concat(bucket)
+    }
+    for (const [dateKey, taskItems] of Object.entries(combinedTaskItemsByDate ?? {})) {
+      const bucket = (Array.isArray(taskItems) ? taskItems : [])
+        .map((task, idx) => {
+          const text = String(task?.text ?? task?.display ?? "").trim()
+          if (!text) return null
+          return {
+            id: `${dateKey}-task-${targetWindow.id}-${idx}`,
+            time: task?.time ? String(task.time).trim() : "",
+            text,
+            color: task?.completed ? "#2563eb" : "#cbd5e1",
+            sourceTitle: targetWindow.title,
+            isTask: true,
+            completed: Boolean(task?.completed)
+          }
+        })
+        .filter(Boolean)
+      if (bucket.length > 0) out[dateKey] = (out[dateKey] ?? []).concat(bucket)
+    }
     return out
   }, [
     activeWindowId,
@@ -3313,7 +3869,9 @@ function stripEmptyGroupLines(bodyText) {
     windowTitleRank,
     windowColorByTitle,
     windows,
-    allowedDashboardGroupTitles
+    allowedDashboardGroupTitles,
+    recurringDisplayItemsByDate,
+    combinedTaskItemsByDate
   ])
 
   const collapsedForActive = dashboardCollapsedByWindow[activeWindowId] ?? {}
@@ -3441,12 +3999,12 @@ function stripEmptyGroupLines(bodyText) {
   const dayListDirtyRef = useRef(false)
   const dayListView = useMemo(() => {
     if (!dayListModal) return null
-    return parseDashboardBlockContent(dayListEditText)
+    return parseDashboardBlockContent(removeTaskLinesFromBody(dayListEditText))
   }, [dayListModal, dayListEditText])
   const dayListReadItems = useMemo(() => {
     if (!dayListView) return null
     const isAll = activeWindowId === "all"
-    const entries = buildOrderedEntriesFromBody(dayListEditText)
+    const entries = buildOrderedEntriesFromBody(removeTaskLinesFromBody(dayListEditText))
     const filtered = isAll && allowedDashboardGroupTitles
       ? entries.filter((entry) => !entry.title || allowedDashboardGroupTitles.has(entry.title))
       : entries
@@ -3676,10 +4234,10 @@ function stripEmptyGroupLines(bodyText) {
     applyTabEditToAllFromText(nextText)
   }
 
-  function openReadDateCreatePicker() {
+  function openReadDateCreatePicker(anchorEl = null) {
     const input = readDateCreateInputRef.current
     if (!input) return
-    const button = readDateCreateButtonRef.current
+    const button = anchorEl ?? readDateCreateButtonRef.current
     if (button) {
       const rect = button.getBoundingClientRect()
       const pickerWidth = 296
@@ -4656,6 +5214,363 @@ function stripEmptyGroupLines(bodyText) {
     setDayListMode("read")
   }
 
+  const dayListRecurringItems = useMemo(() => {
+    if (!dayListModal?.key) return []
+    return Array.isArray(recurringDisplayItemsByDate?.[dayListModal.key])
+      ? recurringDisplayItemsByDate[dayListModal.key]
+      : []
+  }, [dayListModal?.key, recurringDisplayItemsByDate])
+  const dayListTaskItems = useMemo(() => {
+    if (!dayListModal?.key) return []
+    return Array.isArray(combinedTaskItemsByDate?.[dayListModal.key]) ? combinedTaskItemsByDate[dayListModal.key] : []
+  }, [combinedTaskItemsByDate, dayListModal?.key])
+
+  function openRecurringCreate(dateKey, defaultKind = "schedule") {
+    if (!dateKey) return
+    setRecurringModalState({
+      mode: "create",
+      dateKey,
+      defaultCategoryTitle: activeRecurringCategoryTitle || "",
+      defaultKind: defaultKind === "task" ? "task" : "schedule"
+    })
+  }
+
+  function openRecurringEdit(item) {
+    if (!item) return
+    setRecurringModalState({
+      mode: "edit",
+      dateKey: item.dateKey,
+      item,
+      defaultCategoryTitle: activeRecurringCategoryTitle || ""
+    })
+  }
+
+  function closeRecurringModal() {
+    setRecurringModalState(null)
+  }
+
+  function toggleTextTask(task) {
+    if (!task?.dateKey || !Number.isInteger(task?.lineIndex)) return
+    const currentText = activeWindowId === "all" ? textRef.current ?? text : tabEditText ?? ""
+    const bodyText = getDateBlockBodyText(currentText, baseYear, task.dateKey)
+    const nextBodyText = updateTaskLineStatusInBody(bodyText, task.lineIndex, !task.completed)
+    if (nextBodyText === bodyText) return
+    const nextText = updateDateBlockBody(currentText, baseYear, task.dateKey, nextBodyText)
+    if (nextText === currentText) return
+
+    if (activeWindowId === "all") {
+      updateEditorText(nextText)
+      setWindowMemoTextSync(baseYear, "all", nextText)
+      return
+    }
+
+    setTabEditText(nextText)
+    setWindowMemoTextSync(baseYear, activeWindowId, nextText)
+    applyTabEditToAllFromText(nextText)
+  }
+
+  function toggleRecurringTask(task) {
+    const ruleId = String(task?.ruleId ?? "").trim()
+    const dateKey = String(task?.dateKey ?? "").trim()
+    if (!ruleId || !dateKey) return
+
+    const baseRule = (Array.isArray(recurringRules) ? recurringRules : []).find(
+      (rule) => String(rule?.id ?? "").trim() === ruleId
+    )
+    if (!baseRule) return
+
+    const parsed = parseRecurringRawLine(task?.rawLine, task?.title ?? "")
+    const baseRaw = String(parsed.baseRaw ?? "").trim()
+    if (!baseRaw) return
+
+    const nextCompleted = !task?.completed
+    const nextRawLine = `${baseRaw};${nextCompleted ? "O" : "X"}`
+    const baseRuleRawLine = String(baseRule?.rawLine ?? "").trim()
+
+    setRecurringOverrides((prev) => {
+      const list = Array.isArray(prev) ? prev : []
+      const filtered = list.filter(
+        (item) =>
+          !(
+            String(item?.ruleId ?? "").trim() === ruleId &&
+            String(item?.dateKey ?? "").trim() === dateKey
+          )
+      )
+
+      if (nextRawLine === baseRuleRawLine) {
+        return filtered
+      }
+
+      return [
+        ...filtered,
+        {
+          id: genRecurringId("override"),
+          familyId: String(task?.familyId ?? baseRule?.familyId ?? ruleId).trim(),
+          ruleId,
+          dateKey,
+          mode: "replace",
+          rawLine: nextRawLine,
+          updatedAt: new Date().toISOString()
+        }
+      ]
+    })
+  }
+
+  function openTextTask(task) {
+    if (!task?.dateKey) return
+    const { y, m } = keyToYMD(task.dateKey)
+    if (baseYearRef.current !== y) {
+      baseYearRef.current = y
+      setBaseYear(y)
+    }
+    setView({ year: y, month: m })
+    viewRef.current = { year: y, month: m }
+    setActiveDateKey(task.dateKey)
+    scrollReadDateIntoView(task.dateKey, "smooth")
+    openDayList(task.dateKey, [])
+    setTasksOpen(false)
+  }
+
+  function openDdayItem(item) {
+    if (!item?.dateKey) return
+    const { y, m } = keyToYMD(item.dateKey)
+    if (baseYearRef.current !== y) {
+      baseYearRef.current = y
+      setBaseYear(y)
+    }
+    setView({ year: y, month: m })
+    viewRef.current = { year: y, month: m }
+    setActiveDateKey(item.dateKey)
+    scrollReadDateIntoView(item.dateKey, "smooth")
+    openDayList(item.dateKey, itemsByDate[item.dateKey] ?? [])
+    setTasksOpen(false)
+  }
+
+  function toggleAnyTask(task) {
+    if (task?.sourceType === "recurring") {
+      toggleRecurringTask(task)
+      return
+    }
+    toggleTextTask(task)
+  }
+
+  function openAnyTask(task) {
+    if (task?.sourceType === "recurring") {
+      const dateKey = String(task?.dateKey ?? "").trim()
+      if (dateKey) {
+        const { y, m } = keyToYMD(dateKey)
+        if (baseYearRef.current !== y) {
+          baseYearRef.current = y
+          setBaseYear(y)
+        }
+        setView({ year: y, month: m })
+        viewRef.current = { year: y, month: m }
+        setActiveDateKey(dateKey)
+        scrollReadDateIntoView(dateKey, "smooth")
+      }
+      setTasksOpen(false)
+      openRecurringEdit(task)
+      return
+    }
+    openTextTask(task)
+  }
+
+  function buildRecurringRuleFromPayload(payload, fallbackDateKey, familyId = null) {
+    const startDateKey = String(payload?.startDateKey ?? fallbackDateKey ?? "").trim()
+    const untilDateKey = String(payload?.untilDateKey ?? startDateKey).trim() || startDateKey
+    return {
+      id: genRecurringId("rule"),
+      familyId: familyId || genRecurringId("family"),
+      startDateKey,
+      untilDateKey,
+      repeat: normalizeRepeatType(payload?.repeat),
+      repeatInterval: normalizeRepeatInterval(payload?.repeatInterval),
+      repeatDays:
+        normalizeRepeatType(payload?.repeat) === "weekly"
+          ? normalizeRepeatDays(payload?.repeatDays)
+          : [],
+      rawLine: String(payload?.rawLine ?? "").trim(),
+      categoryTitle: String(payload?.categoryTitle ?? activeRecurringCategoryTitle ?? "").trim(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+  }
+
+  function createRecurringRule(payload) {
+    const nextRule = buildRecurringRuleFromPayload(payload, recurringModalState?.dateKey)
+    setRecurringRules((prev) => [...(prev ?? []), nextRule])
+  }
+
+  function updateRecurringRuleScoped(payload, scope) {
+    const target = recurringModalState?.item
+    if (!target) return
+    const familyId = String(target.familyId ?? target.ruleId ?? "").trim()
+    const anchorDateKey = String(target.dateKey ?? "").trim()
+    if (!familyId || !anchorDateKey) return
+
+    const familyRules = (recurringRules ?? [])
+      .filter((rule) => String(rule?.familyId ?? rule?.id ?? "").trim() === familyId)
+      .sort((a, b) => keyToTime(String(a?.startDateKey ?? "")) - keyToTime(String(b?.startDateKey ?? "")))
+    if (familyRules.length === 0) return
+    const familyStartDateKey = familyRules[0]?.startDateKey
+    const normalizedPayload = buildRecurringRuleFromPayload(payload, anchorDateKey, familyId)
+    const nowIso = new Date().toISOString()
+
+    if (scope === "single") {
+      const nextOverride = {
+        id: genRecurringId("override"),
+        familyId,
+        ruleId: String(target.ruleId ?? "").trim(),
+        dateKey: anchorDateKey,
+        mode: "replace",
+        rawLine: normalizedPayload.rawLine,
+        updatedAt: nowIso
+      }
+      setRecurringOverrides((prev) => {
+        const list = Array.isArray(prev) ? prev : []
+        const filtered = list.filter(
+          (item) =>
+            !(
+              String(item?.ruleId ?? "").trim() === nextOverride.ruleId &&
+              String(item?.dateKey ?? "").trim() === anchorDateKey
+            )
+        )
+        return [...filtered, nextOverride]
+      })
+      return
+    }
+
+    if (scope === "future") {
+      const prevDateKey = getPreviousDateKey(anchorDateKey)
+      setRecurringRules((prev) => {
+        const list = Array.isArray(prev) ? prev : []
+        const kept = []
+        for (const rule of list) {
+          const currentFamilyId = String(rule?.familyId ?? rule?.id ?? "").trim()
+          if (currentFamilyId !== familyId) {
+            kept.push(rule)
+            continue
+          }
+          const ruleStart = String(rule?.startDateKey ?? "").trim()
+          const ruleUntil = String(rule?.untilDateKey ?? ruleStart).trim()
+          if (keyToTime(ruleUntil) < keyToTime(anchorDateKey)) {
+            kept.push(rule)
+            continue
+          }
+          if (keyToTime(ruleStart) < keyToTime(anchorDateKey) && keyToTime(prevDateKey) >= keyToTime(ruleStart)) {
+            kept.push({ ...rule, untilDateKey: prevDateKey, updatedAt: nowIso })
+          }
+        }
+        kept.push({
+          ...normalizedPayload,
+          id: genRecurringId("rule"),
+          familyId,
+          startDateKey: anchorDateKey,
+          untilDateKey: normalizedPayload.untilDateKey,
+          createdAt: nowIso,
+          updatedAt: nowIso
+        })
+        return kept
+      })
+      setRecurringOverrides((prev) =>
+        (Array.isArray(prev) ? prev : []).filter(
+          (item) =>
+            String(item?.familyId ?? "").trim() !== familyId || keyToTime(String(item?.dateKey ?? "")) < keyToTime(anchorDateKey)
+        )
+      )
+      return
+    }
+
+    setRecurringRules((prev) => {
+      const list = Array.isArray(prev) ? prev : []
+      const kept = list.filter((rule) => String(rule?.familyId ?? rule?.id ?? "").trim() !== familyId)
+      kept.push({
+        ...normalizedPayload,
+        id: genRecurringId("rule"),
+        familyId,
+        startDateKey: familyStartDateKey,
+        untilDateKey: normalizedPayload.untilDateKey,
+        createdAt: nowIso,
+        updatedAt: nowIso
+      })
+      return kept
+    })
+    setRecurringOverrides((prev) =>
+      (Array.isArray(prev) ? prev : []).filter((item) => String(item?.familyId ?? "").trim() !== familyId)
+    )
+  }
+
+  function deleteRecurringRuleScoped(scope) {
+    const target = recurringModalState?.item
+    if (!target) return
+    const familyId = String(target.familyId ?? target.ruleId ?? "").trim()
+    const anchorDateKey = String(target.dateKey ?? "").trim()
+    if (!familyId || !anchorDateKey) return
+
+    if (scope === "single") {
+      const nextOverride = {
+        id: genRecurringId("override"),
+        familyId,
+        ruleId: String(target.ruleId ?? "").trim(),
+        dateKey: anchorDateKey,
+        mode: "skip",
+        rawLine: "",
+        updatedAt: new Date().toISOString()
+      }
+      setRecurringOverrides((prev) => {
+        const list = Array.isArray(prev) ? prev : []
+        const filtered = list.filter(
+          (item) =>
+            !(
+              String(item?.ruleId ?? "").trim() === nextOverride.ruleId &&
+              String(item?.dateKey ?? "").trim() === anchorDateKey
+            )
+        )
+        return [...filtered, nextOverride]
+      })
+      return
+    }
+
+    if (scope === "future") {
+      const prevDateKey = getPreviousDateKey(anchorDateKey)
+      setRecurringRules((prev) => {
+        const list = Array.isArray(prev) ? prev : []
+        const kept = []
+        for (const rule of list) {
+          const currentFamilyId = String(rule?.familyId ?? rule?.id ?? "").trim()
+          if (currentFamilyId !== familyId) {
+            kept.push(rule)
+            continue
+          }
+          const ruleStart = String(rule?.startDateKey ?? "").trim()
+          const ruleUntil = String(rule?.untilDateKey ?? ruleStart).trim()
+          if (keyToTime(ruleUntil) < keyToTime(anchorDateKey)) {
+            kept.push(rule)
+            continue
+          }
+          if (keyToTime(ruleStart) < keyToTime(anchorDateKey) && keyToTime(prevDateKey) >= keyToTime(ruleStart)) {
+            kept.push({ ...rule, untilDateKey: prevDateKey, updatedAt: new Date().toISOString() })
+          }
+        }
+        return kept
+      })
+      setRecurringOverrides((prev) =>
+        (Array.isArray(prev) ? prev : []).filter(
+          (item) =>
+            String(item?.familyId ?? "").trim() !== familyId || keyToTime(String(item?.dateKey ?? "")) < keyToTime(anchorDateKey)
+        )
+      )
+      return
+    }
+
+    setRecurringRules((prev) =>
+      (Array.isArray(prev) ? prev : []).filter((rule) => String(rule?.familyId ?? rule?.id ?? "").trim() !== familyId)
+    )
+    setRecurringOverrides((prev) =>
+      (Array.isArray(prev) ? prev : []).filter((item) => String(item?.familyId ?? "").trim() !== familyId)
+    )
+  }
+
   function closeDayListModal() {
     flushPendingDayListSync()
     if (
@@ -4921,7 +5836,7 @@ function stripEmptyGroupLines(bodyText) {
                 </button>
                 <button
                   ref={readDateCreateButtonRef}
-                  onClick={openReadDateCreatePicker}
+                  onClick={(e) => openReadDateCreatePicker(e.currentTarget)}
                   style={{
                     ...pillButton,
                     height: 32,
@@ -4992,6 +5907,14 @@ function stripEmptyGroupLines(bodyText) {
               )}
             </div>
           )}
+          <button
+            onClick={() => setTasksOpen((prev) => !prev)}
+            title="Tasks"
+            aria-label="Tasks"
+            style={{ ...memoTopRightButton, fontSize: 12, fontWeight: 900, minWidth: 74 }}
+          >
+            Tasks
+          </button>
           <button
             ref={settingsBtnRef}
             onClick={() => setSettingsOpen((v) => !v)}
@@ -5250,6 +6173,7 @@ function stripEmptyGroupLines(bodyText) {
                     ui={ui}
                     highlightTokens={highlightTokens}
                     todayKey={todayKey}
+                    todayDdayItems={todayDdayItems}
                     hoveredReadDateKey={hoveredReadDateKey}
                     setHoveredReadDateKey={setHoveredReadDateKey}
                     collapsedForActive={collapsedForActive}
@@ -5260,6 +6184,13 @@ function stripEmptyGroupLines(bodyText) {
                     setReadBlockRef={setReadBlockRef}
                     handleReadBlockClick={handleReadBlockClick}
                     readScrollMarginTop={READ_SCROLL_MARGIN_TOP}
+                    memoFontPx={memoFontPx}
+                    recurringItemsByDate={recurringDisplayItemsByDate}
+                    taskItemsByDate={combinedTaskItemsByDate}
+                    onTaskToggle={toggleAnyTask}
+                    onTaskOpen={openAnyTask}
+                    onRecurringOpen={openRecurringEdit}
+                    onDdayOpen={openDdayItem}
                   />
 
                 </div>
@@ -5389,6 +6320,7 @@ function stripEmptyGroupLines(bodyText) {
       handleDayClick={handleDayClick}
       calendarInteractingRef={calendarInteractingRef}
       goToday={goToday}
+      onOpenAddPicker={openReadDateCreatePicker}
     />
   )
 
@@ -5644,7 +6576,17 @@ function stripEmptyGroupLines(bodyText) {
         </div>
       </div>
 
-      <DayListModal
+      <TasksPanel
+        open={tasksOpen}
+        ui={ui}
+        panelFontFamily={panelFontFamily}
+        tasks={allTaskItems}
+        onToggleTask={toggleAnyTask}
+        onOpenTask={openAnyTask}
+        onClose={() => setTasksOpen(false)}
+      />
+
+        <DayListModal
         open={Boolean(dayListModal)}
         onClose={closeDayListModal}
         readOnly={isScheduleReadOnly}
@@ -5658,9 +6600,32 @@ function stripEmptyGroupLines(bodyText) {
         setDayListEditText={handleDayListEditTextChange}
         applyDayListEdit={applyDayListEdit}
         dayListReadItems={dayListReadItems}
+        ddayItems={dayListIsToday ? todayDdayItems : []}
         memoFontPx={memoFontPx}
         editableWindows={editableWindows}
+        recurringItems={dayListRecurringItems}
+        taskItems={dayListTaskItems}
+        onTaskToggle={toggleAnyTask}
+        onTaskOpen={openAnyTask}
+        onDdayOpen={openDdayItem}
+        onRecurringCreate={(kind) => openRecurringCreate(dayListModal?.key, kind)}
+        onRecurringSelect={openRecurringEdit}
       />
+
+      {recurringModalState ? (
+        <RecurringRuleModal
+          open
+          ui={ui}
+          editingOccurrence={recurringModalState.mode === "edit" ? recurringModalState.item ?? null : null}
+          initialDateKey={recurringModalState.dateKey ?? ""}
+          defaultCategoryTitle={recurringModalState.defaultCategoryTitle ?? ""}
+          defaultKind={recurringModalState.defaultKind ?? "schedule"}
+          onClose={closeRecurringModal}
+          onCreate={createRecurringRule}
+          onSave={updateRecurringRuleScoped}
+          onDelete={deleteRecurringRuleScoped}
+        />
+      ) : null}
 
       <DeleteConfirmModal
         deleteConfirm={deleteConfirm}
