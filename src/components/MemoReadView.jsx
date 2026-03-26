@@ -523,7 +523,7 @@ export default function MemoReadView({
                     ))}
                   </div>
                 ) : null}
-                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, paddingBottom: orderedItems.length > 0 ? 8 : 0 }}>
                   {orderedItems.map((item, idx) => (
                     <div
                       key={`${block.dateKey}-${activeWindowId ?? "tab"}-item-${idx}`}
