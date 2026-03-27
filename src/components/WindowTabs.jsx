@@ -44,7 +44,6 @@ export default function WindowTabs({
   canScrollTabsLeft,
   canScrollTabsRight,
   ui,
-  arrowButton,
   iconButton,
   WINDOW_COLORS,
   setWindows
@@ -103,6 +102,44 @@ export default function WindowTabs({
     }
   }, [colorPickerId, colorPickerPos])
 
+  const topToolbarButtonStyle = {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    padding: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "none",
+    flexShrink: 0,
+    userSelect: "none"
+  }
+
+  const topAddButtonStyle = {
+    ...iconButton,
+    ...topToolbarButtonStyle,
+    border: `1px solid ${ui.border}`,
+    background: ui.surface,
+    color: ui.text,
+    cursor: "pointer",
+    fontWeight: 400,
+    lineHeight: 1,
+    position: "relative"
+  }
+
+  function getTopArrowButtonStyle(enabled) {
+    return {
+      ...topToolbarButtonStyle,
+      border: enabled ? `1px solid ${ui.border}` : "1px solid transparent",
+      background: enabled ? ui.surface : "transparent",
+      color: enabled ? ui.text : ui.text2,
+      cursor: enabled ? "pointer" : "default",
+      opacity: enabled ? 1 : 0.2
+    }
+  }
+
+  const topTabHeight = 30
+
   return (
     <div
       className="window-tabs"
@@ -120,8 +157,8 @@ export default function WindowTabs({
         type="button"
         onClick={() => scrollTabs(-1)}
         disabled={!canScrollTabsLeft}
-        className={`arrow-button${canScrollTabsLeft ? " is-active" : ""}`}
-        style={{ ...arrowButton, flexShrink: 0, cursor: canScrollTabsLeft ? "pointer" : "default" }}
+        className="no-hover-outline"
+        style={getTopArrowButtonStyle(canScrollTabsLeft)}
         title={canScrollTabsLeft ? "왼쪽으로 이동" : "왼쪽 끝"}
         aria-label={canScrollTabsLeft ? "왼쪽으로 이동" : "왼쪽 끝"}
       >
@@ -137,7 +174,7 @@ export default function WindowTabs({
           display: "flex",
           gap: 6,
           paddingBottom: 0,
-          paddingTop: 2
+          paddingTop: 0
         }}
       >
         {windows.map((w) => {
@@ -160,7 +197,7 @@ export default function WindowTabs({
                 background: isActive ? ui.accentSoft : ui.surface,
                 padding: isIntegrated ? "0 10px" : "0 2px 0 8px",
                 minWidth: isIntegrated ? 88 : undefined,
-                height: Math.max(30, tabFontPx + 14),
+                height: topTabHeight,
                 gap: isIntegrated ? 6 : 4,
                 cursor: "pointer",
                 flexShrink: 0
@@ -293,15 +330,37 @@ export default function WindowTabs({
         type="button"
         onClick={() => scrollTabs(1)}
         disabled={!canScrollTabsRight}
-        className={`arrow-button${canScrollTabsRight ? " is-active" : ""}`}
-        style={{ ...arrowButton, flexShrink: 0, cursor: canScrollTabsRight ? "pointer" : "default" }}
+        className="no-hover-outline"
+        style={getTopArrowButtonStyle(canScrollTabsRight)}
         title={canScrollTabsRight ? "오른쪽으로 이동" : "오른쪽 끝"}
         aria-label={canScrollTabsRight ? "오른쪽으로 이동" : "오른쪽 끝"}
       >
         <ArrowIcon direction="right" />
       </button>
-      <button onClick={addWindow} style={{ ...iconButton, flexShrink: 0 }} title="새 창 추가" aria-label="새 창 추가">
-        +
+      <button
+        type="button"
+        onClick={addWindow}
+        className="no-hover-outline"
+        style={topAddButtonStyle}
+        title="새 창 추가"
+        aria-label="새 창 추가"
+      >
+        <span
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: Math.max(tabFontPx, 12),
+            lineHeight: 1,
+            fontWeight: 400,
+            transform: "translateY(1px)",
+            pointerEvents: "none"
+          }}
+        >
+          +
+        </span>
       </button>
 
       {colorPickerWindow && colorPickerPos && (

@@ -70,6 +70,12 @@ import {
 } from "./utils/ddays"
 import { extractTasksFromPlannerText, updateTaskLineStatusInBody } from "./utils/tasks"
 import { parseDdaySuffix, parseTaskSuffix, removeTaskLinesFromBody, stripTaskSuffix } from "./utils/taskMarkers"
+import {
+  buildRightMemoCombinedText,
+  getRightMemoDocDisplayTitle,
+  normalizeRightMemoDocState,
+  serializeRightMemoDocState
+} from "./utils/rightMemoDocs"
 
 const CATEGORY_ID_MAP = {}
 const GENERAL_CATEGORY_ID = "__general__"
@@ -1856,6 +1862,7 @@ function App() {
   const [memoInnerCollapsed, setMemoInnerCollapsed] = useState("none") // "none" | "left" | "right"
   const [memoCollapsedByWindow, setMemoCollapsedByWindow] = useState(() => ({}))
   const [rightMemoText, setRightMemoText] = useState("") // ? 오른쪽 메모(기능 없음)
+  const [rightMemoJumpTarget, setRightMemoJumpTarget] = useState(null)
   const [tabEditText, setTabEditText] = useState("")
   const [dashboardSourceTick, setDashboardSourceTick] = useState(0)
   const [isEditingLeftMemo, setIsEditingLeftMemo] = useState(false)
@@ -2389,22 +2396,6 @@ function App() {
     })
   }
 
-  function sanitizeRightMemoBody(rawText, windowsForTitles) {
-    const titleSet = new Set(
-      (windowsForTitles ?? [])
-        .map((w) => String(w?.title ?? "").trim())
-        .filter(Boolean)
-    )
-    const lines = String(rawText ?? "").split("\n")
-    const out = []
-    for (const line of lines) {
-      const match = line.match(/^\s*\[(.+)\]\s*$/)
-      if (match && titleSet.has(String(match[1] ?? "").trim())) continue
-      out.push(line)
-    }
-    return out.join("\n").trimEnd()
-  }
-
   function getLeftMemoTextSync(year) {
     try {
       const key = getLeftMemoKey(memoKeyPrefix, year)
@@ -2456,9 +2447,9 @@ function App() {
   function buildCombinedRightTextForYear(year) {
     const windowTexts = {}
     for (const w of editableWindows) {
-      windowTexts[w.id] = sanitizeRightMemoBody(getRightWindowTextSync(year, w.id), editableWindows)
+      windowTexts[w.id] = buildRightMemoCombinedText(getRightWindowTextSync(year, w.id))
     }
-    const commonText = sanitizeRightMemoBody(getRightWindowTextSync(year, "all"), editableWindows)
+    const commonText = buildRightMemoCombinedText(getRightWindowTextSync(year, "all"))
     return buildCombinedRightText(commonText, editableWindows, integratedFilters, windowTexts)
   }
 
@@ -2481,6 +2472,136 @@ function App() {
     }
     return buildCombinedRightText(normalizedCommon, editableWindows, integratedFilters, windowTexts)
   }
+
+  const allRightMemoGroups = useMemo(
+    () => {
+      const readWindowRaw = (windowId) => {
+        if (activeWindowId !== "all" && windowId === activeWindowId) {
+          return String(rightMemoText ?? "")
+        }
+        try {
+          const key = `${memoKeyPrefix}-right-text-${baseYear}-${windowId}`
+          return String(localStorage.getItem(key) ?? "")
+        } catch {
+          return ""
+        }
+      }
+
+      return editableWindows
+        .map((windowInfo) => {
+          const state = normalizeRightMemoDocState(readWindowRaw(windowInfo.id))
+          const docs = state.docs.map((doc, index) => {
+            const rawContent = String(doc.content ?? "")
+            const cleanedLines = rawContent
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+            const previewLine = cleanedLines[0] ?? ""
+            const excerpt = cleanedLines.slice(0, 5).join("\n")
+
+            return {
+              id: doc.id,
+              title: getRightMemoDocDisplayTitle(doc.title, index),
+              content: rawContent,
+              preview: previewLine,
+              excerpt,
+              lineCount: cleanedLines.length,
+              hasContent: cleanedLines.length > 0
+            }
+          })
+
+          return {
+            windowId: windowInfo.id,
+            title: windowInfo.title,
+            color: windowInfo.color,
+            docs
+          }
+        })
+        .filter((group) => group.docs.length > 0)
+    },
+    [activeWindowId, baseYear, editableWindows, memoKeyPrefix, rightMemoText]
+  )
+
+  const openRightMemoDocFromAll = useCallback((windowId, docId) => {
+    if (!windowId || !docId) return
+    setRightMemoJumpTarget({ windowId, docId })
+    setActiveWindowId(windowId)
+  }, [])
+
+  const saveRightMemoDocFromAll = useCallback(
+    async (windowId, docId, updates) => {
+      if (!windowId || !docId) return
+
+      const currentRaw = getRightWindowTextSync(baseYear, windowId)
+      const state = normalizeRightMemoDocState(currentRaw)
+      const nextDocs = state.docs.map((doc) => {
+        if (doc.id !== docId) return doc
+        return {
+          ...doc,
+          title: typeof updates?.title === "string" ? updates.title : doc.title,
+          content: typeof updates?.content === "string" ? updates.content : doc.content
+        }
+      })
+
+      const nextRaw = serializeRightMemoDocState({
+        docs: nextDocs,
+        activeDocId:
+          typeof state.activeDocId === "string" && nextDocs.some((doc) => doc.id === state.activeDocId)
+            ? state.activeDocId
+            : docId
+      })
+
+      if (nextRaw === currentRaw) return
+
+      setRightWindowTextSync(baseYear, windowId, nextRaw)
+
+      if (activeWindowId === windowId) {
+        suppressRightSaveRef.current = true
+        setRightMemoText(nextRaw)
+        scheduleRightSaveUnsuppress()
+      }
+
+      if (!supabase || !session?.user?.id) return
+
+      try {
+        await saveRightMemoToSupabase(session.user.id, baseYear, windowId, nextRaw)
+      } catch (error) {
+        console.error("save integrated right memo doc", error)
+      }
+    },
+    [activeWindowId, baseYear, session?.user?.id, editableWindows, integratedFilters]
+  )
+
+  const saveRightMemoStateFromAll = useCallback(
+    async (windowId, nextState) => {
+      if (!windowId) return
+
+      const currentRaw = getRightWindowTextSync(baseYear, windowId)
+      const nextRaw =
+        typeof nextState === "string"
+          ? nextState
+          : serializeRightMemoDocState(nextState)
+
+      if (nextRaw === currentRaw) return
+
+      setRightWindowTextSync(baseYear, windowId, nextRaw)
+
+      if (activeWindowId === windowId) {
+        suppressRightSaveRef.current = true
+        setRightMemoText(nextRaw)
+        scheduleRightSaveUnsuppress()
+      }
+
+      if (!supabase || !session?.user?.id) return
+
+      try {
+        await saveRightMemoToSupabase(session.user.id, baseYear, windowId, nextRaw)
+      } catch (error) {
+        console.error("save integrated right memo state", error)
+      }
+    },
+    [activeWindowId, baseYear, session?.user?.id, editableWindows, integratedFilters]
+  )
 
   async function handleAuthSubmit() {
     if (!supabase) return
@@ -3119,12 +3240,13 @@ function stripEmptyGroupLines(bodyText) {
           if (cancelled) return
           const normalizedWindowTexts = {}
           for (const w of editableWindows) {
-            const text = sanitizeRightMemoBody(String(windowTexts?.[w.id] ?? ""), editableWindows)
-            normalizedWindowTexts[w.id] = text
-            setRightWindowTextSync(baseYear, w.id, text)
+            const rawText = String(windowTexts?.[w.id] ?? "")
+            normalizedWindowTexts[w.id] = buildRightMemoCombinedText(rawText)
+            setRightWindowTextSync(baseYear, w.id, rawText)
           }
-          const commonText = sanitizeRightMemoBody(getRightWindowTextSync(baseYear, "all"), editableWindows)
-          setRightWindowTextSync(baseYear, "all", commonText)
+          const commonRawText = getRightWindowTextSync(baseYear, "all")
+          const commonText = buildRightMemoCombinedText(commonRawText)
+          setRightWindowTextSync(baseYear, "all", commonRawText)
           const combined = buildCombinedRightText(commonText, editableWindows, integratedFilters, normalizedWindowTexts)
           setRightMemoText(combined)
           scheduleRightSaveUnsuppress()
@@ -3142,10 +3264,10 @@ function stripEmptyGroupLines(bodyText) {
     const fallback = () => {
       try {
         const saved = localStorage.getItem(rightMemoKey)
-        const normalized = sanitizeRightMemoBody(saved ?? "", editableWindows)
-        setRightMemoText(normalized)
-        if (normalized && supabase && session?.user?.id) {
-          saveRightMemoToSupabase(session.user.id, baseYear, activeWindowId, normalized)
+        const rawText = String(saved ?? "")
+        setRightMemoText(rawText)
+        if (rawText && supabase && session?.user?.id) {
+          saveRightMemoToSupabase(session.user.id, baseYear, activeWindowId, rawText)
         }
       } catch {
         setRightMemoText("")
@@ -3162,10 +3284,10 @@ function stripEmptyGroupLines(bodyText) {
       .then((remoteText) => {
         if (cancelled) return
         if (remoteText != null) {
-          const normalized = sanitizeRightMemoBody(remoteText, editableWindows)
-          setRightMemoText(normalized)
+          const rawText = String(remoteText ?? "")
+          setRightMemoText(rawText)
           try {
-            localStorage.setItem(rightMemoKey, normalized)
+            localStorage.setItem(rightMemoKey, rawText)
           } catch (err) { void err }
           scheduleRightSaveUnsuppress()
         } else {
@@ -3216,6 +3338,11 @@ function stripEmptyGroupLines(bodyText) {
       suppressRightSaveRef.current = false
       return
     }
+
+    if (activeWindowId === "all") {
+      return
+    }
+
     try {
       localStorage.setItem(rightMemoKey, rightMemoText)
     } catch (err) { void err }
@@ -3228,28 +3355,12 @@ function stripEmptyGroupLines(bodyText) {
     const savedYear = baseYear
     const savedWindowId = activeWindowId
     const savedText = rightMemoText
-    const savedWindows = editableWindows
-    const savedFilters = integratedFilters
 
     const flush = () => {
       if (savedWindowId === "all") {
-        const { commonLines, windowLinesById } = splitCombinedRightText(savedText, savedWindows)
-        const normalizedCommon = sanitizeRightMemoBody(commonLines.join("\n").trimEnd(), savedWindows)
-        setRightWindowTextSync(savedYear, "all", normalizedCommon)
-        const visibleWindows = (savedWindows ?? []).filter((w) => !savedFilters || savedFilters[w.id] !== false)
-        for (const w of visibleWindows) {
-          const next = sanitizeRightMemoBody((windowLinesById.get(w.id) ?? []).join("\n").trimEnd(), savedWindows)
-          setRightWindowTextSync(savedYear, w.id, next)
-        }
-        Promise.all(
-          visibleWindows.map((w) => {
-            const next = sanitizeRightMemoBody((windowLinesById.get(w.id) ?? []).join("\n").trimEnd(), savedWindows)
-            return saveRightMemoToSupabase(userId, savedYear, w.id, next)
-          })
-        ).catch((err) => console.error("save all right memos", err))
         return
       }
-      saveRightMemoToSupabase(userId, savedYear, savedWindowId, sanitizeRightMemoBody(savedText, savedWindows))
+      saveRightMemoToSupabase(userId, savedYear, savedWindowId, savedText)
     }
 
     const t = setTimeout(flush, 800)
@@ -3267,15 +3378,19 @@ function stripEmptyGroupLines(bodyText) {
     if (activeWindowId === "all") return buildMemoOverlayLines(text)
     return buildMemoOverlayLines(tabEditText)
   }, [activeWindowId, tabEditText, text])
-  const rightOverlayLines = useMemo(() => buildMemoOverlayLines(rightMemoText), [rightMemoText])
+  const rightOverlayLines = useMemo(() => {
+    if (activeWindowId === "all") return []
+    return buildMemoOverlayLines(rightMemoText)
+  }, [activeWindowId, rightMemoText])
 
   useEffect(() => {
     syncOverlayScroll(textareaRef.current, leftOverlayInnerRef.current)
   }, [text, memoFontPx, memoInnerSplit])
 
   useEffect(() => {
+    if (activeWindowId === "all") return
     syncOverlayScroll(rightTextareaRef.current, rightOverlayInnerRef.current)
-  }, [rightMemoText, memoFontPx, memoInnerSplit])
+  }, [activeWindowId, rightMemoText, memoFontPx, memoInnerSplit])
 
   useEffect(() => {
     updateMentionGhost()
@@ -6218,27 +6333,26 @@ function stripEmptyGroupLines(bodyText) {
                 activeWindowId={activeWindowId}
                 syncCombinedRightText={syncCombinedRightText}
                 ensureRightMemoSectionHeaders={ensureRightMemoSectionHeaders}
+                allMemoGroups={allRightMemoGroups}
+                onOpenMemoDoc={openRightMemoDocFromAll}
+                onSaveMemoDoc={saveRightMemoDocFromAll}
+                onSaveMemoState={saveRightMemoStateFromAll}
+                preferredDocTarget={rightMemoJumpTarget}
+                onPreferredDocHandled={() => setRightMemoJumpTarget(null)}
                 onFocus={() => {
                   setSelectedDateKey(null)
                   lastActiveDateKeyRef.current = null
                 }}
                 onScroll={(e) => syncOverlayScroll(e.currentTarget, rightOverlayInnerRef.current)}
+                ui={{
+                  ...ui,
+                  memoFontPx,
+                  memoLineHeight: memoTextareaStyle.lineHeight ?? 1.55
+                }}
                 placeholder={
                   activeWindowId === "all"
-                    ? [
-                        "[자유 메모장]",
-                        "통합 탭에서는 모든 메모장들의 메모를 합쳐서 보여줍니다.",
-                        "",
-                        "맨 위(섹션 제목 없이)는 공통 메모로 사용하세요.",
-                        "",
-                        "ex)",
-                        "오늘도 화이팅",
-                        "[대학]",
-                        "권교수님 피드백 다시 한 번 생각하기",
-                        "[연애]",
-                        "100일 이벤트 준비하기"
-                      ].join("\n")
-                    : ["[자유 메모]", "", "해당 메모장에 쓰고 싶은 글을 자유롭게 입력하세요."].join("\n")
+                    ? ""
+                    : "이 메모장에 쓰고 싶은 글을 자유롭게 입력하세요."
                 }
               />
             </div>
@@ -6838,6 +6952,10 @@ function stripEmptyGroupLines(bodyText) {
         .memo-input {
           color: transparent;
           caret-color: ${ui.text};
+        }
+        .memo-input:focus {
+          border-color: transparent !important;
+          box-shadow: none !important;
         }
         .memo-input::placeholder {
           color: ${ui.text2};
