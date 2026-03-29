@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   REPEAT_DAILY,
+  REPEAT_MONTHLY,
   REPEAT_WEEKLY,
   REPEAT_YEARLY,
-  REPEAT_MONTHLY,
   WEEKDAY_LABELS,
   formatDateRangeLabel,
   getRepeatLabel,
@@ -39,7 +39,9 @@ function buildDraft({ initialDateKey, editingOccurrence, defaultCategoryTitle, d
   if (editingOccurrence) {
     return {
       startDateKey: String(editingOccurrence.familyStartDateKey ?? editingOccurrence.dateKey ?? initialDateKey ?? "").trim(),
-      untilDateKey: String(editingOccurrence.familyUntilDateKey ?? editingOccurrence.dateKey ?? initialDateKey ?? "").trim(),
+      untilDateKey: String(
+        editingOccurrence.repeatUntilKey ?? editingOccurrence.familyUntilDateKey ?? editingOccurrence.dateKey ?? initialDateKey ?? ""
+      ).trim(),
       repeat: normalizeRepeatType(editingOccurrence.repeat),
       repeatInterval: normalizeRepeatInterval(editingOccurrence.repeatInterval),
       repeatDays: normalizeRepeatDays(editingOccurrence.repeatDays),
@@ -76,6 +78,18 @@ function normalizeComparableDraft(draft) {
   }
 }
 
+function buildFieldStyle(ui) {
+  return {
+    height: 44,
+    borderRadius: 12,
+    border: `1px solid ${ui.border}`,
+    background: ui.surface2,
+    color: ui.text,
+    padding: "0 12px",
+    fontWeight: 700
+  }
+}
+
 export default function RecurringRuleModal({
   open,
   ui,
@@ -92,6 +106,22 @@ export default function RecurringRuleModal({
     buildDraft({ initialDateKey, editingOccurrence, defaultCategoryTitle, defaultKind })
   )
   const [pendingAction, setPendingAction] = useState(null)
+  const lastFiniteUntilDateRef = useRef(String(initialDateKey ?? "").trim())
+  const startDateInputRef = useRef(null)
+  const untilDateInputRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const nextDraft = buildDraft({ initialDateKey, editingOccurrence, defaultCategoryTitle, defaultKind })
+    lastFiniteUntilDateRef.current = String(nextDraft.untilDateKey || nextDraft.startDateKey || initialDateKey || "").trim()
+    setDraft(nextDraft)
+    setPendingAction(null)
+  }, [open, initialDateKey, editingOccurrence, defaultCategoryTitle, defaultKind])
+
+  useEffect(() => {
+    if (!isValidDateKey(draft?.untilDateKey)) return
+    lastFiniteUntilDateRef.current = String(draft.untilDateKey).trim()
+  }, [draft?.untilDateKey])
 
   const isEditing = Boolean(editingOccurrence)
   const originalComparable = useMemo(
@@ -100,6 +130,7 @@ export default function RecurringRuleModal({
   )
   const currentComparable = useMemo(() => normalizeComparableDraft(draft), [draft])
   const isDirty = JSON.stringify(originalComparable) !== JSON.stringify(currentComparable)
+  const isOpenEnded = !draft.untilDateKey
 
   if (!open) return null
 
@@ -131,6 +162,43 @@ export default function RecurringRuleModal({
       }
       return { ...prev, repeatDays: normalizeRepeatDays([...current, dayIndex]) }
     })
+  }
+
+  function toggleOpenEndedRepeat() {
+    setDraft((prev) => {
+      if (prev.untilDateKey) {
+        lastFiniteUntilDateRef.current = String(prev.untilDateKey).trim()
+        return { ...prev, untilDateKey: "" }
+      }
+      const restored = String(lastFiniteUntilDateRef.current || prev.startDateKey || initialDateKey || "").trim()
+      if (!isValidDateKey(restored)) {
+        return { ...prev, untilDateKey: String(prev.startDateKey ?? "").trim() }
+      }
+      return {
+        ...prev,
+        untilDateKey: restored < prev.startDateKey ? String(prev.startDateKey ?? "").trim() : restored
+      }
+    })
+  }
+
+  function openUntilDatePicker() {
+    const node = untilDateInputRef.current
+    if (!node) return
+    if (typeof node.showPicker === "function") {
+      node.showPicker()
+      return
+    }
+    node.click()
+  }
+
+  function openStartDatePicker() {
+    const node = startDateInputRef.current
+    if (!node) return
+    if (typeof node.showPicker === "function") {
+      node.showPicker()
+      return
+    }
+    node.click()
   }
 
   function handleSaveClick() {
@@ -165,7 +233,56 @@ export default function RecurringRuleModal({
   }
 
   const repeatLabel = getRepeatLabel(draft.repeat, draft.repeatInterval)
-  const rangeLabel = formatDateRangeLabel(draft.startDateKey, draft.untilDateKey)
+  const rangeLabel = draft.untilDateKey ? formatDateRangeLabel(draft.startDateKey, draft.untilDateKey) : "계속 반복"
+  const fieldStyle = buildFieldStyle(ui)
+
+  const scopeTitle = pendingAction === "delete" ? "삭제 범위 선택" : "수정 범위 선택"
+  const scopeHint =
+    pendingAction === "save"
+      ? "'이번 항목만 분리'를 선택하면 해당 날짜의 항목만\n일반 일정/Task로 바뀝니다."
+      : "삭제할 범위를 선택하세요."
+  const scopeOptions =
+    pendingAction === "delete"
+      ? [
+          { id: "future", label: "이후 삭제" },
+          { id: "all", label: "전체 삭제" },
+          { id: "single", label: "이번만 삭제" }
+        ]
+      : [
+          { id: "future", label: "이후 반복 유지" },
+          { id: "all", label: "전체 반복 유지" },
+          { id: "single", label: "이번 항목만 분리" }
+        ]
+
+  const dateFieldTextStyle = {
+    flex: 1,
+    minWidth: 0,
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    padding: "0 12px",
+    fontFamily: "inherit",
+    fontSize: 14,
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis"
+  }
+
+  const iconButtonStyle = {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    border: "none",
+    background: "transparent",
+    color: ui.text2,
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+    padding: 0,
+    flexShrink: 0
+  }
 
   return (
     <div
@@ -202,9 +319,7 @@ export default function RecurringRuleModal({
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900 }}>{isEditing ? "반복 수정" : "반복 추가"}</div>
-            <div style={{ color: ui.text2, fontSize: 12 }}>
-              {repeatLabel} {rangeLabel}
-            </div>
+            <div style={{ color: ui.text2, fontSize: 12 }}>{[repeatLabel, rangeLabel].filter(Boolean).join("  ")}</div>
           </div>
           <button
             type="button"
@@ -220,100 +335,165 @@ export default function RecurringRuleModal({
               fontWeight: 800
             }}
           >
-            Close
+            닫기
           </button>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 800 }}>시작 날짜</span>
-            <input
-              type="date"
-              value={draft.startDateKey}
-              onChange={(e) => {
-                const nextDate = e.target.value
-                setDraft((prev) => ({
-                  ...prev,
-                  startDateKey: nextDate,
-                  untilDateKey:
-                    !isValidDateKey(prev.untilDateKey) || prev.untilDateKey < nextDate ? nextDate : prev.untilDateKey,
-                  repeatDays:
-                    prev.repeat === REPEAT_WEEKLY && normalizeRepeatDays(prev.repeatDays).length === 0
-                      ? getDefaultWeeklyDays(nextDate)
-                      : prev.repeatDays
-                }))
-              }}
+            <div
+              onClick={openStartDatePicker}
               style={{
-                height: 44,
-                borderRadius: 12,
-                border: `1px solid ${ui.border}`,
-                background: ui.surface2,
-                color: ui.text,
-                padding: "0 12px",
-                fontWeight: 700
+                ...fieldStyle,
+                padding: "0 8px 0 0",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                position: "relative",
+                overflow: "hidden",
+                cursor: "pointer"
               }}
-            />
+            >
+              <div style={{ ...dateFieldTextStyle, color: ui.text }}>{draft.startDateKey}</div>
+              <button type="button" aria-label="시작 날짜 선택" onClick={openStartDatePicker} style={iconButtonStyle}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <rect x="3.5" y="5.5" width="17" height="15" rx="2.5" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="M7 3.5v4M17 3.5v4M3.5 9.5h17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </button>
+              <input
+                ref={startDateInputRef}
+                type="date"
+                value={draft.startDateKey}
+                onChange={(e) => {
+                  const nextDate = e.target.value
+                  setDraft((prev) => ({
+                    ...prev,
+                    startDateKey: nextDate,
+                    untilDateKey:
+                      !prev.untilDateKey
+                        ? ""
+                        : !isValidDateKey(prev.untilDateKey) || prev.untilDateKey < nextDate
+                          ? nextDate
+                          : prev.untilDateKey,
+                    repeatDays:
+                      prev.repeat === REPEAT_WEEKLY && normalizeRepeatDays(prev.repeatDays).length === 0
+                        ? getDefaultWeeklyDays(nextDate)
+                        : prev.repeatDays
+                  }))
+                }}
+                style={{
+                  position: "absolute",
+                  width: 1,
+                  height: 1,
+                  opacity: 0,
+                  pointerEvents: "none"
+                }}
+                tabIndex={-1}
+              />
+            </div>
           </label>
+
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 800 }}>종료 날짜</span>
-            <input
-              type="date"
-              value={draft.untilDateKey}
-              onChange={(e) => setDraft((prev) => ({ ...prev, untilDateKey: e.target.value }))}
+            <div
               style={{
-                height: 44,
-                borderRadius: 12,
-                border: `1px solid ${ui.border}`,
-                background: ui.surface2,
-                color: ui.text,
-                padding: "0 12px",
-                fontWeight: 700
+                ...fieldStyle,
+                padding: "0 8px 0 0",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                position: "relative",
+                overflow: "hidden"
               }}
-            />
+            >
+              <div style={{ ...dateFieldTextStyle, color: isOpenEnded ? ui.text2 : ui.text }}>
+                {isOpenEnded ? "계속 반복" : draft.untilDateKey}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  aria-label="계속 반복"
+                  aria-pressed={isOpenEnded}
+                  onClick={toggleOpenEndedRepeat}
+                  style={{
+                    height: 28,
+                    padding: "0 10px",
+                    borderRadius: 999,
+                    border: `1px solid ${ui.border}`,
+                    background: isOpenEnded ? ui.accentSoft : ui.surface,
+                    color: isOpenEnded ? ui.accent : ui.text2,
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 800
+                  }}
+                >
+                  계속
+                </button>
+                <button
+                  type="button"
+                  aria-label="종료 날짜 선택"
+                  onClick={openUntilDatePicker}
+                  style={iconButtonStyle}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="3.5" y="5.5" width="17" height="15" rx="2.5" stroke="currentColor" strokeWidth="1.8" />
+                    <path d="M7 3.5v4M17 3.5v4M3.5 9.5h17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+              <input
+                ref={untilDateInputRef}
+                type="date"
+                value={draft.untilDateKey || lastFiniteUntilDateRef.current || draft.startDateKey}
+                onChange={(e) => {
+                  const nextDate = String(e.target.value ?? "").trim()
+                  if (!nextDate) return
+                  lastFiniteUntilDateRef.current = nextDate
+                  setDraft((prev) => ({
+                    ...prev,
+                    untilDateKey: nextDate < prev.startDateKey ? String(prev.startDateKey ?? "").trim() : nextDate
+                  }))
+                }}
+                style={{
+                  position: "absolute",
+                  width: 1,
+                  height: 1,
+                  opacity: 0,
+                  pointerEvents: "none"
+                }}
+                tabIndex={-1}
+              />
+            </div>
           </label>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 800 }}>종류</span>
+            <span style={{ fontSize: 12, fontWeight: 800 }}>유형</span>
             <select
               value={draft.kind}
               onChange={(e) => setDraft((prev) => ({ ...prev, kind: e.target.value === "task" ? "task" : "schedule" }))}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                border: `1px solid ${ui.border}`,
-                background: ui.surface2,
-                color: ui.text,
-                padding: "0 12px",
-                fontWeight: 700
-              }}
+              style={fieldStyle}
             >
               <option value="schedule">일정</option>
               <option value="task">Task</option>
             </select>
           </label>
+
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 800 }}>반복</span>
-            <select
-              value={draft.repeat}
-              onChange={(e) => handleRepeatChange(e.target.value)}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                border: `1px solid ${ui.border}`,
-                background: ui.surface2,
-                color: ui.text,
-                padding: "0 12px",
-                fontWeight: 700
-              }}
-            >
+            <select value={draft.repeat} onChange={(e) => handleRepeatChange(e.target.value)} style={fieldStyle}>
               <option value={REPEAT_DAILY}>매일</option>
               <option value={REPEAT_WEEKLY}>매주</option>
               <option value={REPEAT_MONTHLY}>매월</option>
               <option value={REPEAT_YEARLY}>매년</option>
             </select>
           </label>
+
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 800 }}>간격</span>
             <input
@@ -326,15 +506,7 @@ export default function RecurringRuleModal({
                 setDraft((prev) => ({ ...prev, repeatInterval: normalizeRepeatInterval(prev.repeatInterval) }))
               }
               inputMode="numeric"
-              style={{
-                height: 44,
-                borderRadius: 12,
-                border: `1px solid ${ui.border}`,
-                background: ui.surface2,
-                color: ui.text,
-                padding: "0 12px",
-                fontWeight: 700
-              }}
+              style={fieldStyle}
             />
           </label>
         </div>
@@ -347,7 +519,7 @@ export default function RecurringRuleModal({
                 const active = normalizeRepeatDays(draft.repeatDays).includes(dayIndex)
                 return (
                   <button
-                    key={label}
+                    key={`${label}-${dayIndex}`}
                     type="button"
                     onClick={() => toggleRepeatDay(dayIndex)}
                     style={{
@@ -378,8 +550,8 @@ export default function RecurringRuleModal({
             placeholder={
               draft.kind === "task"
                 ? defaultCategoryTitle
-                  ? `예: @${defaultCategoryTitle};논문, 시물 설계`
-                  : "예: @공부;논문, 시물 설계"
+                  ? `예: @${defaultCategoryTitle};할 일`
+                  : "예: @공부;할 일"
                 : defaultCategoryTitle
                   ? `예: 13:00;회의 (${defaultCategoryTitle} 탭에서는 @ 없이 입력 가능)`
                   : "예: 13:00;@공부;복습"
@@ -421,6 +593,7 @@ export default function RecurringRuleModal({
           ) : (
             <div />
           )}
+
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button
               type="button"
@@ -483,18 +656,11 @@ export default function RecurringRuleModal({
                 gap: 12
               }}
             >
-              <div style={{ fontWeight: 900, fontSize: 18 }}>
-                {pendingAction === "delete" ? "삭제 범위 선택" : "수정 범위 선택"}
-              </div>
-              <div style={{ color: ui.text2, lineHeight: 1.5 }}>
-                기준 날짜 {editingOccurrence?.dateKey ?? initialDateKey}
-              </div>
+              <div style={{ fontWeight: 900, fontSize: 18 }}>{scopeTitle}</div>
+              <div style={{ color: ui.text2, lineHeight: 1.5 }}>기준 날짜: {editingOccurrence?.dateKey ?? initialDateKey}</div>
+              <div style={{ color: ui.text2, lineHeight: 1.5, fontSize: 13, whiteSpace: "pre-line" }}>{scopeHint}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {[
-                  { id: "single", label: "이 날짜만" },
-                  { id: "future", label: "이 날짜 포함 이후" },
-                  { id: "all", label: "전체" }
-                ].map((item) => (
+                {scopeOptions.map((item) => (
                   <button
                     key={item.id}
                     type="button"

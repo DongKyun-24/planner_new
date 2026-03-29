@@ -1,15 +1,13 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import CalendarPanel from "./components/CalendarPanel"
+import CollectionsPanel from "./components/CollectionsPanel"
 import DayListModal from "./components/DayListModal"
-import DdaysPanel from "./components/DdaysPanel"
 import DeleteConfirmModal from "./components/DeleteConfirmModal"
-import FilterPanel from "./components/FilterPanel"
 import MemoEditor from "./components/MemoEditor"
 import MemoReadView from "./components/MemoReadView"
 import RecurringRuleModal from "./components/RecurringRuleModal"
 import RightMemoEditor from "./components/RightMemoEditor"
 import SettingsPanel from "./components/SettingsPanel"
-import TasksPanel from "./components/TasksPanel"
 import WindowTabs from "./components/WindowTabs"
 import { isSupabaseConfigured, supabase } from "./lib/supabase"
 import { themes } from "./styles/themes"
@@ -56,6 +54,8 @@ import {
   removeAllEmptyBlocks
 } from "./utils/plannerText"
 import {
+  addDaysToKey,
+  buildOccurrenceDateKeys,
   buildRecurringByDate,
   genRecurringId,
   getPreviousDateKey,
@@ -101,6 +101,8 @@ const OFFLINE_RECURRING_RULES_KEY = "planner-recurring-rules-offline-v1"
 const OFFLINE_RECURRING_OVERRIDES_KEY = "planner-recurring-overrides-offline-v1"
 const USER_RECURRING_RULES_KEY_PREFIX = "planner-recurring-rules-user-v1"
 const USER_RECURRING_OVERRIDES_KEY_PREFIX = "planner-recurring-overrides-user-v1"
+const USER_RECURRING_CLOUD_MIGRATION_KEY_PREFIX = "planner-recurring-cloud-migrated-v1"
+const OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS = 400
 
 function getClientId() {
   if (typeof window === "undefined") return "server"
@@ -138,6 +140,7 @@ function App() {
   const readBlockRefs = useRef(new Map())
   const clientIdRef = useRef(getClientId())
   const endTimeSupportedRef = useRef(true)
+  const repeatColumnsSupportedRef = useRef(true)
 
   // ===== 창(캘린더) 탭 =====
   const WINDOWS_KEY = "planner-windows-v1"
@@ -173,6 +176,10 @@ function App() {
 
   function getRecurringOverridesStorageKey(userId) {
     return userId ? `${USER_RECURRING_OVERRIDES_KEY_PREFIX}-${userId}` : OFFLINE_RECURRING_OVERRIDES_KEY
+  }
+
+  function getRecurringCloudMigrationKey(userId) {
+    return userId ? `${USER_RECURRING_CLOUD_MIGRATION_KEY_PREFIX}-${userId}` : ""
   }
 
   function loadRecurringList(storageKey) {
@@ -361,6 +368,9 @@ function App() {
   const lastCloudSyncRef = useRef({ year: null, text: "" })
   const forceRemoteApplyRef = useRef(false)
   const lastSessionIdRef = useRef(null)
+  const remotePlansLoadSeqRef = useRef(0)
+  const remotePlansIgnoreLoadsUntilRef = useRef(0)
+  const openEndedRecurringSyncRef = useRef(false)
   const [remoteWindows, setRemoteWindows] = useState([])
   const [remoteWindowsLoaded, setRemoteWindowsLoaded] = useState(false)
   const applyingRemoteWindowsRef = useRef(false)
@@ -383,11 +393,16 @@ function App() {
     () => getRecurringOverridesStorageKey(session?.user?.id ?? null),
     [session?.user?.id]
   )
+  const recurringCloudMigrationKey = useMemo(
+    () => getRecurringCloudMigrationKey(session?.user?.id ?? null),
+    [session?.user?.id]
+  )
   const [recurringRules, setRecurringRules] = useState(() => loadRecurringList(OFFLINE_RECURRING_RULES_KEY))
   const [recurringOverrides, setRecurringOverrides] = useState(() => loadRecurringList(OFFLINE_RECURRING_OVERRIDES_KEY))
   const [recurringModalState, setRecurringModalState] = useState(null)
-  const [ddaysOpen, setDdaysOpen] = useState(false)
-  const [tasksOpen, setTasksOpen] = useState(false)
+  const recurringCloudMigrationRunningRef = useRef(false)
+  const [collectionOpen, setCollectionOpen] = useState(false)
+  const [collectionMode, setCollectionMode] = useState("tasks")
 
   const [text, setText] = useState("")
   const [today, setToday] = useState(() => new Date())
@@ -505,6 +520,185 @@ function App() {
     return start
   }
 
+  function genSeriesId() {
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+      const r = Math.floor(Math.random() * 16)
+      const v = ch === "x" ? r : (r & 0x3) | 0x8
+      return v.toString(16)
+    })
+  }
+
+  function dateToKey(date) {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, "0")
+    const day = String(date.getDate()).padStart(2, "0")
+    return `${year}-${month}-${day}`
+  }
+
+  function getOpenEndedRepeatHorizonDateKey(baseDate = new Date(), lookaheadDays = OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS) {
+    const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate())
+    start.setDate(start.getDate() + Math.max(1, Number(lookaheadDays) || OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS))
+    return dateToKey(start)
+  }
+
+  function getOpenEndedRepeatSpanDays(startDateKey, baseDate = new Date(), lookaheadDays = OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS) {
+    const startMs = keyToTime(startDateKey)
+    if (!Number.isFinite(startMs)) return 365
+    const horizonMs = keyToTime(getOpenEndedRepeatHorizonDateKey(baseDate, lookaheadDays))
+    const diffDays = Math.ceil((horizonMs - startMs) / (24 * 60 * 60 * 1000))
+    return Math.max(365, diffDays)
+  }
+
+  function normalizeRepeatMeta(row) {
+    const repeatType = normalizeRepeatType(row?.repeat_type ?? row?.repeatType)
+    const repeatInterval = repeatType === "none" ? 1 : normalizeRepeatInterval(row?.repeat_interval ?? row?.repeatInterval)
+    const repeatDays = repeatType === "weekly" ? normalizeRepeatDays(row?.repeat_days ?? row?.repeatDays) : []
+    const repeatUntil = repeatType === "none" ? "" : String(row?.repeat_until ?? row?.repeatUntil ?? "").trim()
+    const seriesId = String(row?.series_id ?? row?.seriesId ?? "").trim()
+    return { repeatType, repeatInterval, repeatDays, repeatUntil, seriesId }
+  }
+
+  function isRecurringPlanRow(row) {
+    const repeatMeta = normalizeRepeatMeta(row)
+    return repeatMeta.repeatType !== "none" || Boolean(repeatMeta.seriesId)
+  }
+
+  function buildRecurringRawLineFromPlanRow(row) {
+    const taskAware = stripTaskSuffix(String(row?.content ?? "").trim())
+    const baseText = String(taskAware.text ?? "").trim()
+    if (!baseText) return ""
+    const normalizedTime = normalizePlanTimeFields(row)
+    const timeLabel = buildTimeSpanLabel(normalizedTime.time, normalizedTime.end_time)
+    let category = normalizeCategoryId(String(row?.category_id ?? "").trim())
+    if (isGeneralCategoryId(category)) category = ""
+
+    const parts = []
+    if (timeLabel) parts.push(timeLabel)
+    if (category) parts.push(`@${category}`)
+    parts.push(baseText)
+
+    let rawLine = parts.join(";")
+    if (taskAware.dday) rawLine += ";D"
+    if (taskAware.completed != null) rawLine += `;${taskAware.completed ? "O" : "X"}`
+    return rawLine
+  }
+
+  function getNextSortOrderForDate(dateKey, planRows, excludedIds = null) {
+    if (!sortOrderSupportedRef.current) return null
+    const key = String(dateKey ?? "").trim()
+    if (!key) return null
+    const excludeSet = excludedIds instanceof Set ? excludedIds : null
+    const list = (planRows ?? []).filter((row) => {
+      if (!row || row?.deleted_at) return false
+      if (String(row?.date ?? "").trim() !== key) return false
+      const id = String(row?.id ?? "").trim()
+      if (excludeSet && id && excludeSet.has(id)) return false
+      return true
+    })
+    if (list.length === 0) return 0
+    const values = list
+      .map((row) => parsePlanOrderValue(row?.sort_order ?? row?.sortOrder ?? row?.order))
+      .filter((n) => n != null)
+    if (values.length === 0) return null
+    return Math.max(...values) + 1
+  }
+
+  function buildCloudRecurringByDate(planRows, year, categoryFilter = null) {
+    const yearPrefix = `${year}-`
+    const familyRange = new Map()
+
+    for (const row of planRows ?? []) {
+      if (!row || row?.deleted_at || !isRecurringPlanRow(row)) continue
+      const dateKey = String(row?.date ?? "").trim()
+      if (!dateKey) continue
+      const repeatMeta = normalizeRepeatMeta(row)
+      const familyId = repeatMeta.seriesId || String(row?.id ?? "").trim()
+      if (!familyId) continue
+      const untilDateKey = repeatMeta.repeatUntil || dateKey
+      const current = familyRange.get(familyId)
+      if (!current) {
+        familyRange.set(familyId, { startDateKey: dateKey, untilDateKey })
+        continue
+      }
+      if (keyToTime(dateKey) < keyToTime(current.startDateKey)) current.startDateKey = dateKey
+      if (keyToTime(untilDateKey) > keyToTime(current.untilDateKey)) current.untilDateKey = untilDateKey
+    }
+
+    const out = {}
+    for (const row of planRows ?? []) {
+      if (!row || row?.deleted_at || !isRecurringPlanRow(row)) continue
+      const dateKey = String(row?.date ?? "").trim()
+      if (!dateKey.startsWith(yearPrefix)) continue
+
+      const rawLine = buildRecurringRawLineFromPlanRow(row)
+      if (!rawLine) continue
+
+      let categoryTitle = normalizeCategoryId(String(row?.category_id ?? "").trim())
+      if (isGeneralCategoryId(categoryTitle)) categoryTitle = ""
+      if (categoryFilter) {
+        if (!categoryTitle || categoryTitle !== categoryFilter) continue
+      }
+
+      const repeatMeta = normalizeRepeatMeta(row)
+      const familyId = repeatMeta.seriesId || String(row?.id ?? "").trim()
+      const family = familyRange.get(familyId) ?? {
+        startDateKey: dateKey,
+        untilDateKey: repeatMeta.repeatUntil || dateKey
+      }
+
+      ;(out[dateKey] ??= []).push({
+        id: `rec-plan-${String(row?.id ?? familyId)}`,
+        planId: row?.id,
+        row,
+        ruleId: String(row?.id ?? "").trim(),
+        familyId,
+        dateKey,
+        repeat: repeatMeta.repeatType,
+        repeatInterval: repeatMeta.repeatInterval,
+        repeatDays: repeatMeta.repeatDays,
+        rawLine,
+        display: "",
+        time: "",
+        title: categoryTitle,
+        text: "",
+        createdAt: String(row?.created_at ?? row?.createdAt ?? "").trim(),
+        updatedAt: String(row?.updated_at ?? row?.updatedAt ?? "").trim(),
+        familyStartDateKey: family.startDateKey,
+        familyUntilDateKey: family.untilDateKey,
+        repeatUntilKey: repeatMeta.repeatUntil || ""
+      })
+    }
+
+    for (const dateKey of Object.keys(out)) {
+      out[dateKey].sort((a, b) => {
+        const rowA = a?.row ?? null
+        const rowB = b?.row ?? null
+        const sortA = parsePlanOrderValue(rowA?.sort_order ?? rowA?.sortOrder ?? rowA?.order)
+        const sortB = parsePlanOrderValue(rowB?.sort_order ?? rowB?.sortOrder ?? rowB?.order)
+        if (sortA != null || sortB != null) {
+          if (sortA == null) return 1
+          if (sortB == null) return -1
+          if (sortA !== sortB) return sortA - sortB
+        }
+        const timeA = buildTimeSpanLabel(rowA?.time, rowA?.end_time ?? rowA?.endTime)
+        const timeB = buildTimeSpanLabel(rowB?.time, rowB?.end_time ?? rowB?.endTime)
+        if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+        if (timeA && !timeB) return -1
+        if (!timeA && timeB) return 1
+        const createdA = parsePlanTimestampMs(rowA?.created_at ?? rowA?.createdAt)
+        const createdB = parsePlanTimestampMs(rowB?.created_at ?? rowB?.createdAt)
+        if (createdA != null || createdB != null) {
+          if (createdA == null) return 1
+          if (createdB == null) return -1
+          if (createdA !== createdB) return createdA - createdB
+        }
+        return String(rowA?.id ?? "").localeCompare(String(rowB?.id ?? ""), "en")
+      })
+    }
+
+    return out
+  }
+
   function isSortOrderColumnError(error) {
     const msg = String(error?.message ?? "").toLowerCase()
     return msg.includes("sort_order") || (msg.includes("column") && msg.includes("sort") && msg.includes("order"))
@@ -513,6 +707,35 @@ function App() {
   function isEndTimeColumnError(error) {
     const msg = String(error?.message ?? "").toLowerCase()
     return msg.includes("end_time") || (msg.includes("column") && msg.includes("end") && msg.includes("time"))
+  }
+
+  function isRepeatColumnError(error) {
+    const msg = String(error?.message ?? "").toLowerCase()
+    if (!msg) return false
+    return (
+      msg.includes("repeat_type") ||
+      msg.includes("repeat_interval") ||
+      msg.includes("repeat_days") ||
+      msg.includes("repeat_until") ||
+      msg.includes("series_id") ||
+      msg.includes("invalid input syntax for type uuid")
+    )
+  }
+
+  function markRepeatFallbackNotice() {
+    if (!repeatColumnsSupportedRef.current) return
+    repeatColumnsSupportedRef.current = false
+    setAuthMessageTone("info")
+    setAuthMessage("반복 일정 DB 컬럼이 없어 웹 반복 일정은 기기 간 동기화되지 않습니다. SQL 마이그레이션을 먼저 적용해야 합니다.")
+  }
+
+  function isRightMemoMetaColumnError(error) {
+    const msg = String(error?.message ?? "").toLowerCase()
+    if (!msg) return false
+    return (
+      msg.includes("right_memos") &&
+      (msg.includes("client_id") || msg.includes("updated_at") || (msg.includes("column") && msg.includes("memo")))
+    )
   }
 
   function stripEndTimeFromRows(rows) {
@@ -533,103 +756,43 @@ function App() {
     })
   }
 
+  function buildPlanContentWithMeta(baseText, { completed = null, dday = false } = {}) {
+    const text = String(baseText ?? "").trim()
+    if (!text) return ""
+    let next = text
+    if (dday) next += ";D"
+    if (completed != null) next += `;${completed ? "O" : "X"}`
+    return next
+  }
+
+  function pushExtractedPlanRow(out, { dateKey, time = "", title = "", rawText = "", order = 0 } = {}) {
+    const taskAware = stripTaskSuffix(rawText)
+    const text = String(taskAware.text ?? "").trim()
+    if (!text) return
+    const normalizedTitle = normalizeCategoryId(String(title ?? "").trim())
+    const timeFields = normalizePlanTimeFields({ time: String(time ?? "").trim() })
+    out.push({
+      date: String(dateKey ?? "").trim(),
+      time: timeFields.time,
+      end_time: timeFields.end_time,
+      category_id: normalizedTitle || GENERAL_CATEGORY_ID,
+      content: buildPlanContentWithMeta(text, {
+        completed: taskAware.completed,
+        dday: taskAware.dday
+      }),
+      sort_order: Number.isFinite(order) ? order : 0
+    })
+  }
+
   function buildPlanOrderMapFromText(sourceText, year) {
     const map = new Map()
-    const src = String(sourceText ?? "")
-    if (!src.trim()) return map
-
-    const parsed = parseBlocksAndItems(src, year, { allowAnyYear: true })
-    for (const block of parsed.blocks) {
-      const body = src.slice(block.bodyStartPos, block.blockEndPos)
-      const normalizedBody = normalizeGroupLineNewlines(body)
-      const lines = normalizedBody.split("\n")
-      let order = 0
-
-      for (const rawLine of lines) {
-        const trimmed = rawLine.trim()
-        if (!trimmed) continue
-
-        const semicolon = parseDashboardSemicolonLine(trimmed)
-        if (semicolon) {
-          const taskAware = stripTaskSuffix(semicolon.text)
-          const content = String(taskAware.text ?? "").trim()
-          if (!content) continue
-          const categoryId = semicolon.group ? normalizeCategoryId(semicolon.group) : GENERAL_CATEGORY_ID
-          const timeFields = normalizePlanTimeFields({ time: semicolon.time || "" })
-          const key = buildPlanKey({
-            date: block.dateKey,
-            time: timeFields.time,
-            end_time: timeFields.end_time,
-            category_id: categoryId,
-            content
-          })
-          if (!map.has(key)) map.set(key, order)
-          order++
-          continue
-        }
-
-        const emptySemicolon = parseDashboardSemicolonLine(trimmed, { allowEmptyText: true })
-        if (emptySemicolon && !emptySemicolon.text) continue
-
-        const match = trimmed.match(groupLineRegex)
-        if (match) {
-          const title = normalizeCategoryId(match[1].trim())
-          if (!title) continue
-          const items = String(match[2] ?? "")
-            .split(";")
-            .map((x) => x.trim())
-            .filter((x) => x !== "")
-          for (const item of items) {
-            const parsedItem = parseTimePrefix(item)
-            const taskAware = stripTaskSuffix(parsedItem ? parsedItem.text : item)
-            const text = String(taskAware.text ?? "").trim()
-            if (!text) continue
-            const timeFields = normalizePlanTimeFields({ time: parsedItem ? parsedItem.time : "" })
-            const key = buildPlanKey({
-              date: block.dateKey,
-              time: timeFields.time,
-              end_time: timeFields.end_time,
-              category_id: title,
-              content: text
-            })
-            if (!map.has(key)) map.set(key, order)
-            order++
-          }
-          continue
-        }
-
-        const timeLine = parseTimePrefix(trimmed)
-        if (timeLine) {
-          const taskAware = stripTaskSuffix(timeLine.text)
-          const text = String(taskAware.text ?? "").trim()
-          if (!text) continue
-          const timeFields = normalizePlanTimeFields({ time: timeLine.time || "" })
-          const key = buildPlanKey({
-            date: block.dateKey,
-            time: timeFields.time,
-            end_time: timeFields.end_time,
-            category_id: GENERAL_CATEGORY_ID,
-            content: text
-          })
-          if (!map.has(key)) map.set(key, order)
-          order++
-          continue
-        }
-
-        const taskAware = stripTaskSuffix(trimmed)
-        const content = String(taskAware.text ?? "").trim()
-        if (!content) continue
-        const key = buildPlanKey({
-          date: block.dateKey,
-          time: "",
-          category_id: GENERAL_CATEGORY_ID,
-          content
-        })
-        if (!map.has(key)) map.set(key, order)
-        order++
-      }
+    const extracted = extractPlansFromText(sourceText ?? "", year)
+    for (const row of extracted) {
+      const key = buildPlanKey(row)
+      if (!key || map.has(key)) continue
+      const order = Number.isFinite(row?.sort_order) ? row.sort_order : map.size
+      map.set(key, order)
     }
-
     return map
   }
 
@@ -703,30 +866,17 @@ function App() {
   function buildTextFromPlans(plans, year, previousText = "") {
     const yearPrefix = `${year}-`
     const orderMap = buildPlanOrderMapFromText(previousText, year)
-    const ddayMarkerCounts = buildDdayMarkerCountMapFromText(previousText, year)
-    const taskLinesByDate = new Map()
-    const prevParsed = parseBlocksAndItems(previousText ?? "", year)
-    for (const block of prevParsed.blocks ?? []) {
-      const body = String(previousText ?? "").slice(block.bodyStartPos, block.blockEndPos)
-      const taskLines = body
-        .replace(/\r\n/g, "\n")
-        .split("\n")
-        .map((line) => String(line ?? "").trim())
-        .filter((line) => {
-          if (!line) return false
-          return Boolean(parseTaskSuffix(line))
-        })
-      if (taskLines.length > 0) taskLinesByDate.set(block.dateKey, taskLines)
-    }
 
     const byDate = new Map()
     let rowIndex = 0
     for (const row of plans ?? []) {
       if (row?.deleted_at) continue
+      if (isRecurringPlanRow(row)) continue
       const dateKey = String(row?.date ?? "")
       if (!dateKey.startsWith(yearPrefix)) continue
-      const content = String(row?.content ?? "").trim()
-      if (!content) continue
+      const taskAware = stripTaskSuffix(row?.content)
+      const baseContent = String(taskAware.text ?? "").trim()
+      if (!baseContent) continue
       const category = normalizeCategoryId(String(row?.category_id ?? "").trim())
       const isGeneral = isGeneralCategoryId(category)
       const normalizedTime = normalizePlanTimeFields(row)
@@ -734,6 +884,10 @@ function App() {
       const endTime = normalizedTime.end_time ?? ""
       const timeLabel = buildTimeSpanLabel(time, endTime)
       const categoryId = isGeneral ? GENERAL_CATEGORY_ID : category
+      const content = buildPlanContentWithMeta(baseContent, {
+        completed: taskAware.completed,
+        dday: taskAware.dday
+      })
       const sortOrder = parsePlanOrderValue(row?.sort_order ?? row?.sortOrder ?? row?.order)
       const createdAtMs = parsePlanTimestampMs(row?.created_at ?? row?.createdAt)
       const updatedAtMs = parsePlanTimestampMs(row?.updated_at ?? row?.updatedAt)
@@ -747,6 +901,10 @@ function App() {
         category: isGeneral ? "" : category,
         categoryId,
         content,
+        baseContent,
+        isTask: taskAware.completed != null,
+        taskCompleted: Boolean(taskAware.completed),
+        dday: Boolean(taskAware.dday),
         isGeneral,
         order: preservedOrder,
         sortOrder,
@@ -758,9 +916,7 @@ function App() {
       byDate.set(dateKey, bucket)
     }
 
-    const sortedDates = [...new Set([...byDate.keys(), ...taskLinesByDate.keys()])].sort(
-      (a, b) => keyToTime(a) - keyToTime(b)
-    )
+    const sortedDates = [...byDate.keys()].sort((a, b) => keyToTime(a) - keyToTime(b))
     const blocks = sortedDates.map((dateKey) => {
       const { m, d } = keyToYMD(dateKey)
       const header = buildHeaderLine(year, m, d)
@@ -804,29 +960,17 @@ function App() {
       const lines = items.map((item) => {
         const baseLine = item.isGeneral
           ? item.timeLabel
-            ? `${item.timeLabel};${item.content}`
-            : item.content
+            ? `${item.timeLabel};${item.baseContent}`
+            : item.baseContent
           : item.timeLabel
-            ? `${item.timeLabel};@${item.category};${item.content}`
-            : `@${item.category};${item.content}`
-
-        const key = buildPlanKey({
-          date: dateKey,
-          time: item.time,
-          end_time: item.endTime,
-          category_id: item.categoryId,
-          content: item.content
-        })
-        const ddayCount = ddayMarkerCounts.get(key) ?? 0
-        if (ddayCount > 0) {
-          ddayMarkerCounts.set(key, ddayCount - 1)
-          return `${baseLine};D`
-        }
-        return baseLine
+            ? `${item.timeLabel};@${item.category};${item.baseContent}`
+            : `@${item.category};${item.baseContent}`
+        let line = baseLine
+        if (item.dday) line += ";D"
+        if (item.isTask) line += `;${item.taskCompleted ? "O" : "X"}`
+        return line
       })
-      const taskLines = taskLinesByDate.get(dateKey) ?? []
-      const mergedLines = [...lines, ...taskLines]
-      return mergedLines.length > 0 ? `${header}\n${mergedLines.join("\n")}` : header
+      return lines.length > 0 ? `${header}\n${lines.join("\n")}` : header
     })
     return blocks.join("\n\n").trimEnd()
   }
@@ -835,26 +979,72 @@ function App() {
     const out = []
     const parsed = parseBlocksAndItems(sourceText ?? "", year)
     for (const block of parsed.blocks) {
-      const body = (sourceText ?? "")
-        .slice(block.bodyStartPos, block.blockEndPos)
-        .replace(/\r\n/g, "\n")
-        .split("\n")
-        .filter((line) => !parseTaskSuffix(String(line ?? "").trim()))
-        .join("\n")
-      const entries = buildOrderedEntriesFromBody(body)
-      for (const entry of entries) {
-        const text = String(entry?.text ?? "").trim()
-        if (!text) continue
-        const title = normalizeCategoryId(String(entry?.title ?? "").trim())
-        const timeFields = normalizePlanTimeFields({ time: entry?.time ? String(entry.time).trim() : "" })
-        out.push({
-          date: block.dateKey,
-          time: timeFields.time,
-          end_time: timeFields.end_time,
-          category_id: title || GENERAL_CATEGORY_ID,
-          content: text,
-          sort_order: entry?.order ?? 0
+      const body = normalizeGroupLineNewlines(
+        (sourceText ?? "")
+          .slice(block.bodyStartPos, block.blockEndPos)
+      )
+      const lines = body.split("\n")
+      let order = 0
+      for (const rawLine of lines) {
+        const trimmed = String(rawLine ?? "").trim()
+        if (!trimmed) continue
+
+        const semicolon = parseDashboardSemicolonLine(trimmed)
+        if (semicolon) {
+          pushExtractedPlanRow(out, {
+            dateKey: block.dateKey,
+            time: semicolon.time || "",
+            title: semicolon.group ?? "",
+            rawText: semicolon.text,
+            order
+          })
+          order += 1
+          continue
+        }
+
+        const emptySemicolon = parseDashboardSemicolonLine(trimmed, { allowEmptyText: true })
+        if (emptySemicolon && !emptySemicolon.text) continue
+
+        const match = trimmed.match(groupLineRegex)
+        if (match) {
+          const title = normalizeCategoryId(String(match[1] ?? "").trim())
+          if (!title) continue
+          const items = String(match[2] ?? "")
+            .split(";")
+            .map((x) => x.trim())
+            .filter((x) => x !== "")
+          for (const item of items) {
+            const parsedItem = parseTimePrefix(item)
+            pushExtractedPlanRow(out, {
+              dateKey: block.dateKey,
+              time: parsedItem ? parsedItem.time : "",
+              title,
+              rawText: parsedItem ? parsedItem.text : item,
+              order
+            })
+            order += 1
+          }
+          continue
+        }
+
+        const timeLine = parseTimePrefix(trimmed)
+        if (timeLine) {
+          pushExtractedPlanRow(out, {
+            dateKey: block.dateKey,
+            time: timeLine.time || "",
+            rawText: timeLine.text,
+            order
+          })
+          order += 1
+          continue
+        }
+
+        pushExtractedPlanRow(out, {
+          dateKey: block.dateKey,
+          rawText: trimmed,
+          order
         })
+        order += 1
       }
     }
     return out
@@ -877,8 +1067,15 @@ function App() {
     )
   }
 
-  async function loadRemotePlans(userId) {
+  function suspendRemotePlansLoads(ms = 2500) {
+    remotePlansIgnoreLoadsUntilRef.current = Math.max(remotePlansIgnoreLoadsUntilRef.current, Date.now() + ms)
+  }
+
+  async function loadRemotePlans(userId, options = {}) {
     if (!supabase) return
+    const force = Boolean(options?.force)
+    const requestSeq = ++remotePlansLoadSeqRef.current
+    const blockedUntilAtStart = remotePlansIgnoreLoadsUntilRef.current
     const { data, error } = await supabase
       .from("plans")
       .select("*")
@@ -886,6 +1083,14 @@ function App() {
       .is("deleted_at", null)
     if (error) {
       console.error("load plans", error)
+      return
+    }
+    if (requestSeq !== remotePlansLoadSeqRef.current) return
+    if (
+      !force &&
+      (blockedUntilAtStart !== remotePlansIgnoreLoadsUntilRef.current ||
+        Date.now() < remotePlansIgnoreLoadsUntilRef.current)
+    ) {
       return
     }
     const updates = []
@@ -909,6 +1114,12 @@ function App() {
     setRemoteLoaded(true)
     const titles = new Set(rows.map((row) => String(row.category_id ?? "").trim()).filter(Boolean))
     ensureWindowsForCategories(titles)
+    ensureOpenEndedRecurringCoverage(userId, rows)
+      .then((changed) => {
+        if (!changed) return
+        loadRemotePlans(userId, { force: true }).catch(() => {})
+      })
+      .catch(() => {})
   }
 
   async function loadRemoteWindows(userId) {
@@ -1268,40 +1479,82 @@ function App() {
 
   function extractPlansFromDayBody(bodyText, dateKey, scopedWindowTitle = null) {
     const out = []
-    const filteredBody = String(bodyText ?? "")
-      .replace(/\r\n/g, "\n")
-      .split("\n")
-      .filter((line) => !parseTaskSuffix(String(line ?? "").trim()))
-      .join("\n")
-    const entries = buildOrderedEntriesFromBody(filteredBody)
     const scopedTitle = scopedWindowTitle ? normalizeCategoryId(scopedWindowTitle) : null
+    const body = normalizeGroupLineNewlines(String(bodyText ?? ""))
+    const lines = body.split("\n")
+    let order = 0
 
-    for (const entry of entries) {
-      const text = String(entry?.text ?? "").trim()
-      if (!text) continue
-      const entryTitle = normalizeCategoryId(String(entry?.title ?? "").trim())
-      const timeFields = normalizePlanTimeFields({ time: entry?.time ? String(entry.time).trim() : "" })
-      if (scopedTitle) {
-        if (entryTitle && entryTitle !== scopedTitle) continue
-        out.push({
-          date: dateKey,
-          time: timeFields.time,
-          end_time: timeFields.end_time,
-          category_id: scopedTitle,
-          content: text,
-          sort_order: entry?.order ?? 0
+    for (const rawLine of lines) {
+      const trimmed = String(rawLine ?? "").trim()
+      if (!trimmed) continue
+
+      const semicolon = parseDashboardSemicolonLine(trimmed)
+      if (semicolon) {
+        const entryTitle = normalizeCategoryId(String(semicolon.group ?? "").trim())
+        if (scopedTitle && entryTitle && entryTitle !== scopedTitle) {
+          order += 1
+          continue
+        }
+        pushExtractedPlanRow(out, {
+          dateKey,
+          time: semicolon.time || "",
+          title: scopedTitle || entryTitle || "",
+          rawText: semicolon.text,
+          order
         })
+        order += 1
         continue
       }
 
-      out.push({
-        date: dateKey,
-        time: timeFields.time,
-        end_time: timeFields.end_time,
-        category_id: entryTitle || GENERAL_CATEGORY_ID,
-        content: text,
-        sort_order: entry?.order ?? 0
+      const emptySemicolon = parseDashboardSemicolonLine(trimmed, { allowEmptyText: true })
+      if (emptySemicolon && !emptySemicolon.text) continue
+
+      const match = trimmed.match(groupLineRegex)
+      if (match) {
+        const title = normalizeCategoryId(String(match[1] ?? "").trim())
+        if (!title) continue
+        const items = String(match[2] ?? "")
+          .split(";")
+          .map((x) => x.trim())
+          .filter((x) => x !== "")
+        for (const item of items) {
+          const parsedItem = parseTimePrefix(item)
+          if (scopedTitle && title !== scopedTitle) {
+            order += 1
+            continue
+          }
+          pushExtractedPlanRow(out, {
+            dateKey,
+            time: parsedItem ? parsedItem.time : "",
+            title: scopedTitle || title,
+            rawText: parsedItem ? parsedItem.text : item,
+            order
+          })
+          order += 1
+        }
+        continue
+      }
+
+      const timeLine = parseTimePrefix(trimmed)
+      if (timeLine) {
+        pushExtractedPlanRow(out, {
+          dateKey,
+          time: timeLine.time || "",
+          title: scopedTitle || "",
+          rawText: timeLine.text,
+          order
+        })
+        order += 1
+        continue
+      }
+
+      pushExtractedPlanRow(out, {
+        dateKey,
+        title: scopedTitle || "",
+        rawText: trimmed,
+        order
       })
+      order += 1
     }
     return out
   }
@@ -1310,6 +1563,7 @@ function App() {
     if (!canUseWebRowPlanEdit) return
     if (!supabase || !session?.user?.id) return
     const userId = session.user.id
+    suspendRemotePlansLoads()
     const scopedWindow =
       windowId && windowId !== "all" ? windows.find((w) => String(w?.id) === String(windowId)) : null
     if (windowId && windowId !== "all" && !scopedWindow) return
@@ -1337,9 +1591,10 @@ function App() {
       return
     }
 
+    const currentRowsFiltered = (data ?? []).filter((row) => !isRecurringPlanRow(row))
     const currentMap = new Map()
     const duplicateRows = []
-    for (const row of currentRows ?? []) {
+    for (const row of currentRowsFiltered) {
       const key = buildPlanKey(row)
       if (!key) continue
       if (currentMap.has(key)) {
@@ -1448,7 +1703,7 @@ function App() {
         .filter((title) => title && !isGeneralCategoryId(title))
     )
     ensureWindowsForCategories(categoryTitles)
-    await loadRemotePlans(userId)
+    await loadRemotePlans(userId, { force: true })
   }
 
   function runPendingDayListSyncNow() {
@@ -1657,6 +1912,159 @@ function App() {
   useEffect(() => {
     saveRecurringList(recurringOverridesStorageKey, recurringOverrides)
   }, [recurringOverridesStorageKey, recurringOverrides])
+
+  useEffect(() => {
+    const userId = session?.user?.id ?? null
+    if (!supabase || !userId || !remoteLoaded) return
+    if (!hasCloudSession) return
+    if (recurringCloudMigrationRunningRef.current) return
+    if (!recurringCloudMigrationKey) return
+
+    const localRules = Array.isArray(recurringRules) ? recurringRules : []
+    if (localRules.length === 0) return
+
+    let alreadyMigrated = false
+    try {
+      alreadyMigrated = localStorage.getItem(recurringCloudMigrationKey) === "1"
+    } catch {
+      alreadyMigrated = false
+    }
+    if (alreadyMigrated) return
+
+    const hasCloudRecurring = (remotePlans ?? []).some((row) => isRecurringPlanRow(row))
+    if (hasCloudRecurring) {
+      try {
+        localStorage.setItem(recurringCloudMigrationKey, "1")
+      } catch {
+        // ignore
+      }
+      return
+    }
+
+    const localOverrides = Array.isArray(recurringOverrides) ? recurringOverrides : []
+    const validRules = localRules.filter((rule) => {
+      const startDateKey = String(rule?.startDateKey ?? rule?.start_date ?? "").trim()
+      const untilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? "").trim()
+      const rawLine = String(rule?.rawLine ?? rule?.raw_line ?? "").trim()
+      return isValidDateKey(startDateKey) && (!untilDateKey || isValidDateKey(untilDateKey)) && rawLine
+    })
+    if (validRules.length === 0) {
+      try {
+        localStorage.setItem(recurringCloudMigrationKey, "1")
+      } catch {
+        // ignore
+      }
+      return
+    }
+
+    const rangeStartKey = validRules
+      .map((rule) => String(rule?.startDateKey ?? rule?.start_date ?? "").trim())
+      .sort()[0]
+    const rangeEndKey = validRules
+      .map((rule) => {
+        const startDateKey = String(rule?.startDateKey ?? rule?.start_date ?? "").trim()
+        const untilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? "").trim()
+        return untilDateKey || addDaysToKey(startDateKey, getOpenEndedRepeatSpanDays(startDateKey))
+      })
+      .sort()
+      .slice(-1)[0]
+    const occurrencesByDate = buildRecurringByDate(validRules, localOverrides, rangeStartKey, rangeEndKey, null)
+    const allDates = Object.keys(occurrencesByDate).sort()
+    if (allDates.length === 0) {
+      try {
+        localStorage.setItem(recurringCloudMigrationKey, "1")
+      } catch {
+        // ignore
+      }
+      return
+    }
+
+    recurringCloudMigrationRunningRef.current = true
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        const familySeriesMap = new Map()
+        const sortSeeds = new Map()
+        const rows = []
+
+        for (const dateKey of allDates) {
+          for (const occurrence of occurrencesByDate[dateKey] ?? []) {
+            const familyKey = String(occurrence?.familyId ?? occurrence?.ruleId ?? "").trim()
+            if (!familyKey) continue
+            if (!familySeriesMap.has(familyKey)) familySeriesMap.set(familyKey, genSeriesId())
+            const seriesId = familySeriesMap.get(familyKey)
+            let sortOrderOverride = null
+            if (sortOrderSupportedRef.current) {
+              const existingSeed = sortSeeds.get(dateKey)
+              if (existingSeed != null) {
+                sortOrderOverride = existingSeed
+                sortSeeds.set(dateKey, existingSeed + 1)
+              } else {
+                const seed = getNextSortOrderForDate(dateKey, remotePlans)
+                if (seed != null) {
+                  sortOrderOverride = seed
+                  sortSeeds.set(dateKey, seed + 1)
+                }
+              }
+            }
+            const row = buildSingleRecurringPlanPayload(
+              userId,
+              {
+                rawLine: occurrence?.rawLine,
+                categoryTitle: occurrence?.title,
+                repeat: occurrence?.repeat,
+                repeatInterval: occurrence?.repeatInterval,
+                repeatDays: occurrence?.repeatDays,
+                untilDateKey: occurrence?.repeatUntilKey
+              },
+              dateKey,
+              {
+                seriesIdOverride: seriesId,
+                repeatTypeOverride: occurrence?.repeat,
+                sortOrderOverride
+              }
+            )
+            if (row) rows.push(row)
+          }
+        }
+
+        if (rows.length > 0) {
+          suspendRemotePlansLoads()
+          await insertRecurringPlanRows(rows)
+        }
+
+        if (cancelled) return
+        setRecurringRules([])
+        setRecurringOverrides([])
+        try {
+          localStorage.setItem(recurringCloudMigrationKey, "1")
+        } catch {
+          // ignore
+        }
+        ensureWindowsForCategories(
+          new Set(rows.map((row) => normalizeCategoryId(String(row?.category_id ?? "").trim())).filter((title) => title && !isGeneralCategoryId(title)))
+        )
+        await loadRemotePlans(userId, { force: true })
+      } catch (error) {
+        console.error("migrate local recurring rules", error)
+      } finally {
+        recurringCloudMigrationRunningRef.current = false
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    hasCloudSession,
+    recurringCloudMigrationKey,
+    recurringOverrides,
+    recurringRules,
+    remoteLoaded,
+    remotePlans,
+    session?.user?.id
+  ])
 
   useEffect(() => {
     if (!supabase || !session?.user?.id) return
@@ -2379,6 +2787,7 @@ function App() {
   const suppressRightSaveRef = useRef(false)
   const rightMemoSyncTimerRef = useRef(null)
   const rightSaveSuppressResetRef = useRef(null)
+  const rightMemoMetaColumnsSupportedRef = useRef(true)
   const editableWindows = useMemo(() => windows.filter((w) => w.id !== "all"), [windows])
   const windowTitlesOrder = useMemo(() => windows.filter((w) => w.id !== "all").map((w) => w.title), [windows])
   const windowTitleRank = useMemo(() => {
@@ -3211,24 +3620,56 @@ function stripEmptyGroupLines(bodyText) {
   async function saveRightMemoToSupabase(userId, year, windowId, content) {
     if (!supabase || !userId || !windowId) return
     const nextText = String(content ?? "")
-    if (!nextText.trim()) {
-      await supabase
-        .from("right_memos")
-        .delete()
-        .eq("user_id", userId)
-        .eq("year", year)
-        .eq("window_id", windowId)
+    const basePayload = {
+      user_id: userId,
+      year,
+      window_id: windowId,
+      content: nextText
+    }
+    if (rightMemoMetaColumnsSupportedRef.current) {
+      const { error } = await supabase.from("right_memos").upsert(
+        {
+          ...basePayload,
+          updated_at: new Date().toISOString(),
+          client_id: clientIdRef.current
+        },
+        { onConflict: "user_id,year,window_id" }
+      )
+      if (!error) return
+      if (!isRightMemoMetaColumnError(error)) throw error
+      rightMemoMetaColumnsSupportedRef.current = false
+    }
+    const { error } = await supabase.from("right_memos").upsert(basePayload, {
+      onConflict: "user_id,year,window_id"
+    })
+    if (error) throw error
+  }
+
+  function applyRemoteRightMemoWindowSync(windowId, rawText, year = baseYear) {
+    const targetWindowId = String(windowId ?? "").trim()
+    if (!targetWindowId) return
+    const nextRaw = String(rawText ?? "")
+    setRightWindowTextSync(year, targetWindowId, nextRaw)
+
+    const isFocusedSpecificEditor =
+      typeof document !== "undefined" &&
+      rightTextareaRef.current &&
+      document.activeElement === rightTextareaRef.current
+    const hasPendingSpecificSave = Boolean(rightMemoSyncTimerRef.current)
+
+    if (activeWindowId === targetWindowId) {
+      if (isFocusedSpecificEditor || hasPendingSpecificSave) return
+      suppressRightSaveRef.current = true
+      setRightMemoText(nextRaw)
+      scheduleRightSaveUnsuppress()
       return
     }
-    await supabase.from("right_memos").upsert(
-      {
-        user_id: userId,
-        year,
-        window_id: windowId,
-        content: nextText
-      },
-      { onConflict: "user_id,year,window_id" }
-    )
+
+    if (activeWindowId === "all") {
+      suppressRightSaveRef.current = true
+      setRightMemoText(buildCombinedRightTextForYear(year))
+      scheduleRightSaveUnsuppress()
+    }
   }
 
   // ? 오른쪽 메모(연도별) 로드
@@ -3317,6 +3758,45 @@ function stripEmptyGroupLines(bodyText) {
     }
   }, [rightMemoKey, baseYear, activeWindowId, editableWindows, integratedFilters, session?.user?.id])
 
+  useEffect(() => {
+    const userId = session?.user?.id
+    if (!supabase || !userId) return
+    const channel = supabase
+      .channel(`right-memos-changes-${userId}-${baseYear}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "right_memos", filter: `user_id=eq.${userId}` },
+        (payload) => {
+          const changedYear = Number(payload?.new?.year ?? payload?.old?.year ?? NaN)
+          if (Number.isFinite(changedYear) && changedYear !== baseYear) return
+
+          const incomingClientId = String(payload?.new?.client_id ?? payload?.old?.client_id ?? "").trim()
+          if (incomingClientId && incomingClientId === clientIdRef.current) return
+
+          const targetWindowId = String(payload?.new?.window_id ?? payload?.old?.window_id ?? "").trim()
+          if (!targetWindowId) return
+
+          const nextRaw =
+            payload?.eventType === "DELETE"
+              ? ""
+              : typeof payload?.new?.content === "string"
+                ? payload.new.content
+                : ""
+
+          applyRemoteRightMemoWindowSync(targetWindowId, nextRaw, baseYear)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      try {
+        supabase.removeChannel(channel)
+      } catch (err) {
+        void err
+      }
+    }
+  }, [session?.user?.id, baseYear, activeWindowId, editableWindows, integratedFilters])
+
 
   useEffect(() => {
     if (suppressSaveRef.current) {
@@ -3376,7 +3856,7 @@ function stripEmptyGroupLines(bodyText) {
       saveRightMemoToSupabase(userId, savedYear, savedWindowId, savedText)
     }
 
-    const t = setTimeout(flush, 800)
+    const t = setTimeout(flush, 350)
     rightMemoSyncTimerRef.current = t
 
     return () => {
@@ -3444,6 +3924,9 @@ function stripEmptyGroupLines(bodyText) {
     return String(windows.find((w) => w.id === activeWindowId)?.title ?? "").trim()
   }, [activeWindowId, windows])
   const recurringItemsByDate = useMemo(() => {
+    if (hasCloudSession) {
+      return buildCloudRecurringByDate(remotePlans, baseYear, activeRecurringCategoryTitle || null)
+    }
     const rangeStartKey = `${baseYear}-01-01`
     const rangeEndKey = `${baseYear}-12-31`
     return buildRecurringByDate(
@@ -3453,7 +3936,7 @@ function stripEmptyGroupLines(bodyText) {
       rangeEndKey,
       activeRecurringCategoryTitle || null
     )
-  }, [baseYear, recurringRules, recurringOverrides, activeRecurringCategoryTitle])
+  }, [baseYear, recurringRules, recurringOverrides, activeRecurringCategoryTitle, hasCloudSession, remotePlans])
   const tasksSourceText = useMemo(() => {
     if (activeWindowId === "all") return text
     return tabEditText ?? ""
@@ -5401,7 +5884,545 @@ function stripEmptyGroupLines(bodyText) {
     applyTabEditToAllFromText(nextText)
   }
 
+  function findRemoteTaskPlanRow(task) {
+    const userId = session?.user?.id ?? null
+    if (!userId) return null
+
+    const dateKey = String(task?.dateKey ?? "").trim()
+    const taskText = String(task?.text ?? "").trim()
+    if (!dateKey || !taskText) return null
+
+    const scopedTitle =
+      activeWindowId === "all"
+        ? ""
+        : normalizeCategoryId(String(windows.find((w) => w.id === activeWindowId)?.title ?? "").trim())
+
+    let expectedCategory = normalizeCategoryId(String(task?.title ?? "").trim())
+    if (!expectedCategory) expectedCategory = scopedTitle || GENERAL_CATEGORY_ID
+
+    const expectedTime = String(task?.time ?? "").trim()
+
+    const candidates = (remotePlans ?? []).filter((row) => {
+      if (!row || row.user_id !== userId || row.deleted_at) return false
+      if (isRecurringPlanRow(row)) return false
+      if (String(row?.date ?? "").trim() !== dateKey) return false
+
+      const normalizedTime = normalizePlanTimeFields(row)
+      if (String(normalizedTime.time ?? "").trim() !== expectedTime) return false
+
+      let rowCategory = normalizeCategoryId(String(row?.category_id ?? "").trim())
+      if (!rowCategory) rowCategory = GENERAL_CATEGORY_ID
+      if (rowCategory !== expectedCategory) return false
+
+      const parsedTask = parseTaskSuffix(String(row?.content ?? "").trim())
+      if (!parsedTask) return false
+      if (String(parsedTask.baseRaw ?? "").trim() !== taskText) return false
+      if (task?.dday != null && Boolean(parsedTask.dday) !== Boolean(task.dday)) return false
+
+      return true
+    })
+
+    if (candidates.length === 0) return null
+
+    candidates.sort((a, b) => {
+      const sortA = Number(a?.sort_order ?? a?.sortOrder ?? Number.NaN)
+      const sortB = Number(b?.sort_order ?? b?.sortOrder ?? Number.NaN)
+      if (Number.isFinite(sortA) && Number.isFinite(sortB) && sortA !== sortB) return sortA - sortB
+
+      const updatedA = Date.parse(String(a?.updated_at ?? a?.updatedAt ?? ""))
+      const updatedB = Date.parse(String(b?.updated_at ?? b?.updatedAt ?? ""))
+      if (Number.isFinite(updatedA) && Number.isFinite(updatedB) && updatedA !== updatedB) return updatedA - updatedB
+
+      return String(a?.id ?? "").localeCompare(String(b?.id ?? ""), "en")
+    })
+
+    return candidates[0]
+  }
+
+  async function persistTextTaskToggle(task) {
+    if (!canUseWebRowPlanEdit || !supabase || !session?.user?.id) return
+
+    const userId = session.user.id
+    const targetRow = findRemoteTaskPlanRow(task)
+    if (!targetRow?.id) {
+      console.warn("toggle task row not found", task)
+      return
+    }
+
+    const parsedTask = parseTaskSuffix(String(targetRow?.content ?? "").trim())
+    const baseText = String(parsedTask?.baseRaw ?? task?.text ?? "").trim()
+    if (!baseText) return
+
+    const nextCompleted = !task?.completed
+    const nextContent = buildPlanContentWithMeta(baseText, {
+      completed: nextCompleted,
+      dday: Boolean(parsedTask?.dday ?? task?.dday)
+    })
+    const updatedAt = new Date().toISOString()
+    suspendRemotePlansLoads()
+
+    setRemotePlans((prev) =>
+      (prev ?? []).map((row) =>
+        row?.id === targetRow.id
+          ? { ...row, content: nextContent, updated_at: updatedAt, client_id: clientIdRef.current }
+          : row
+      )
+    )
+
+    const { error } = await supabase
+      .from("plans")
+      .update({ content: nextContent, updated_at: updatedAt, client_id: clientIdRef.current })
+      .eq("id", targetRow.id)
+      .eq("user_id", userId)
+
+    if (error) {
+      console.error("toggle task", error)
+      await loadRemotePlans(userId, { force: true })
+    }
+  }
+
+  function buildRecurringPlanFieldsFromPayload(payload, fallbackCategoryTitle = "") {
+    const rawLine = String(payload?.rawLine ?? "").trim()
+    const taskAware = stripTaskSuffix(rawLine)
+    const baseRaw = String(taskAware.text ?? "").trim()
+    if (!baseRaw) return null
+
+    let categoryTitle = String(payload?.categoryTitle ?? fallbackCategoryTitle ?? "").trim()
+    let timeToken = ""
+    let content = ""
+
+    const semicolon = parseDashboardSemicolonLine(baseRaw)
+    if (semicolon) {
+      if (semicolon.group) categoryTitle = String(semicolon.group).trim()
+      timeToken = semicolon.time || ""
+      content = String(semicolon.text ?? "").trim()
+    } else {
+      const timed = parseTimePrefix(baseRaw)
+      if (timed) {
+        timeToken = timed.time || ""
+        content = String(timed.text ?? "").trim()
+      } else {
+        content = baseRaw
+      }
+    }
+
+    if (!content) return null
+    const timeFields = normalizePlanTimeFields({ time: timeToken })
+    let categoryId = normalizeCategoryId(categoryTitle)
+    if (!categoryId) categoryId = GENERAL_CATEGORY_ID
+
+    return {
+      time: timeFields.time,
+      end_time: timeFields.end_time,
+      category_id: categoryId,
+      content: buildPlanContentWithMeta(content, {
+        completed: taskAware.completed,
+        dday: taskAware.dday
+      })
+    }
+  }
+
+  function buildSingleRecurringPlanPayload(userId, payload, dateKey, { seriesIdOverride = null, repeatTypeOverride = null, sortOrderOverride = null } = {}) {
+    const planFields = buildRecurringPlanFieldsFromPayload(payload, payload?.categoryTitle ?? activeRecurringCategoryTitle ?? "")
+    if (!planFields?.content) return null
+
+    const repeatType = normalizeRepeatType(repeatTypeOverride ?? payload?.repeat)
+    const repeatInterval = repeatType === "none" ? 1 : normalizeRepeatInterval(payload?.repeatInterval)
+    const repeatDays = repeatType === "weekly" ? normalizeRepeatDays(payload?.repeatDays) : null
+    const repeatUntil = repeatType === "none" ? null : String(payload?.untilDateKey ?? payload?.repeatUntil ?? dateKey ?? "").trim() || null
+    const seriesId =
+      repeatType === "none"
+        ? null
+        : String(seriesIdOverride ?? payload?.seriesId ?? "").trim() || null
+
+    const row = {
+      user_id: userId,
+      date: String(dateKey ?? "").trim(),
+      time: planFields.time,
+      content: planFields.content,
+      category_id: planFields.category_id,
+      series_id: seriesId,
+      repeat_type: repeatType,
+      repeat_interval: repeatInterval,
+      repeat_days: repeatDays,
+      repeat_until: repeatUntil,
+      client_id: clientIdRef.current,
+      updated_at: new Date().toISOString()
+    }
+    if (endTimeSupportedRef.current) row.end_time = planFields.end_time || null
+    if (sortOrderOverride != null) row.sort_order = sortOrderOverride
+    return row
+  }
+
+  function buildRecurringPlanRows(userId, payload, { seriesIdOverride = null, startDateKeyOverride = null, repeatTypeOverride = null, excludedIds = null } = {}) {
+    const repeatType = normalizeRepeatType(repeatTypeOverride ?? payload?.repeat)
+    const startDateKey = String(startDateKeyOverride ?? payload?.startDateKey ?? recurringModalState?.dateKey ?? "").trim()
+    if (!startDateKey) return []
+
+    if (repeatType === "none") {
+      const row = buildSingleRecurringPlanPayload(userId, payload, startDateKey, {
+        seriesIdOverride: null,
+        repeatTypeOverride: "none",
+        sortOrderOverride: getNextSortOrderForDate(startDateKey, remotePlans, excludedIds)
+      })
+      return row ? [row] : []
+    }
+
+    const rawUntilDateKey = String(payload?.untilDateKey ?? "").trim()
+    const untilDateKey =
+      rawUntilDateKey || addDaysToKey(startDateKey, getOpenEndedRepeatSpanDays(startDateKey))
+    const repeatInterval = normalizeRepeatInterval(payload?.repeatInterval)
+    const repeatDays = repeatType === "weekly" ? normalizeRepeatDays(payload?.repeatDays) : []
+    const dateKeys = buildOccurrenceDateKeys(
+      {
+        startDateKey,
+        untilDateKey,
+        repeat: repeatType,
+        repeatInterval,
+        repeatDays
+      },
+      startDateKey,
+      untilDateKey
+    )
+    const seriesId = String(seriesIdOverride ?? payload?.seriesId ?? genSeriesId()).trim() || genSeriesId()
+    const sortSeeds = new Map()
+
+    return dateKeys
+      .map((dateKey) => {
+        let sortOrderOverride = null
+        if (sortOrderSupportedRef.current) {
+          const existingSeed = sortSeeds.get(dateKey)
+          if (existingSeed != null) {
+            sortOrderOverride = existingSeed
+            sortSeeds.set(dateKey, existingSeed + 1)
+          } else {
+            const seed = getNextSortOrderForDate(dateKey, remotePlans, excludedIds)
+            if (seed != null) {
+              sortOrderOverride = seed
+              sortSeeds.set(dateKey, seed + 1)
+            }
+          }
+        }
+        return buildSingleRecurringPlanPayload(userId, payload, dateKey, {
+          seriesIdOverride: seriesId,
+          repeatTypeOverride: repeatType,
+          sortOrderOverride
+        })
+      })
+      .filter(Boolean)
+  }
+
+  function buildOpenEndedRecurringAppendRows(userId, planRows) {
+    if (!repeatColumnsSupportedRef.current) return []
+    const rows = Array.isArray(planRows) ? planRows.filter((row) => row && !row?.deleted_at) : []
+    if (rows.length === 0) return []
+
+    const horizonKey = getOpenEndedRepeatHorizonDateKey()
+    const horizonMs = keyToTime(horizonKey)
+    const groups = new Map()
+
+    for (const row of rows) {
+      const repeatMeta = normalizeRepeatMeta(row)
+      const seriesId = String(repeatMeta.seriesId ?? "").trim()
+      const dateKey = String(row?.date ?? "").trim()
+      if (!seriesId || !dateKey) continue
+      if (repeatMeta.repeatType === "none" || repeatMeta.repeatUntil) continue
+
+      const current = groups.get(seriesId)
+      if (!current) {
+        groups.set(seriesId, {
+          seriesId,
+          repeatMeta,
+          startDateKey: dateKey,
+          latestDateKey: dateKey,
+          sampleRow: row
+        })
+        continue
+      }
+
+      if (keyToTime(dateKey) < keyToTime(current.startDateKey)) {
+        current.startDateKey = dateKey
+        current.sampleRow = row
+      }
+      if (keyToTime(dateKey) > keyToTime(current.latestDateKey)) {
+        current.latestDateKey = dateKey
+      }
+    }
+
+    const nextRows = []
+    const mergedRows = [...rows]
+
+    for (const group of groups.values()) {
+      const latestMs = keyToTime(group.latestDateKey)
+      if (!Number.isFinite(latestMs) || latestMs >= horizonMs) continue
+
+      const untilDateKey = addDaysToKey(group.startDateKey, getOpenEndedRepeatSpanDays(group.startDateKey))
+      const desiredKeys = buildOccurrenceDateKeys(
+        {
+          startDateKey: group.startDateKey,
+          untilDateKey,
+          repeat: group.repeatMeta.repeatType,
+          repeatInterval: group.repeatMeta.repeatInterval,
+          repeatDays: group.repeatMeta.repeatDays ?? []
+        },
+        group.startDateKey,
+        untilDateKey
+      ).filter((dateKey) => keyToTime(dateKey) > latestMs && keyToTime(dateKey) <= horizonMs)
+
+      for (const dateKey of desiredKeys) {
+        const sortOrderOverride = sortOrderSupportedRef.current ? getNextSortOrderForDate(dateKey, mergedRows) : null
+        const nextRow = buildSingleRecurringPlanPayload(userId, group.sampleRow, dateKey, {
+          seriesIdOverride: group.seriesId,
+          repeatTypeOverride: group.repeatMeta.repeatType,
+          sortOrderOverride
+        })
+        if (!nextRow) continue
+        nextRows.push(nextRow)
+        mergedRows.push(nextRow)
+      }
+    }
+
+    return nextRows
+  }
+
+  async function ensureOpenEndedRecurringCoverage(userId, planRows) {
+    if (!supabase || !userId || openEndedRecurringSyncRef.current) return false
+    const appendRows = buildOpenEndedRecurringAppendRows(userId, planRows)
+    if (appendRows.length === 0) return false
+
+    openEndedRecurringSyncRef.current = true
+    try {
+      suspendRemotePlansLoads()
+      await insertRecurringPlanRows(appendRows)
+      return true
+    } catch (error) {
+      console.error("ensure open-ended recurring coverage", error)
+      return false
+    } finally {
+      openEndedRecurringSyncRef.current = false
+    }
+  }
+
+  async function insertRecurringPlanRows(rows) {
+    const list = Array.isArray(rows) ? rows : []
+    if (list.length === 0) return
+    const chunkSize = 200
+    for (let i = 0; i < list.length; i += chunkSize) {
+      let chunk = list.slice(i, i + chunkSize)
+      chunk = endTimeSupportedRef.current ? chunk : stripEndTimeFromRows(chunk)
+      chunk = sortOrderSupportedRef.current ? chunk : stripSortOrderFromRows(chunk)
+      let { error } = await supabase.from("plans").insert(chunk)
+      if (error && isRepeatColumnError(error)) {
+        markRepeatFallbackNotice()
+        throw error
+      }
+      if (error && isEndTimeColumnError(error)) {
+        endTimeSupportedRef.current = false
+        chunk = stripEndTimeFromRows(chunk)
+        const retry = await supabase.from("plans").insert(sortOrderSupportedRef.current ? chunk : stripSortOrderFromRows(chunk))
+        error = retry.error
+      }
+      if (error && isSortOrderColumnError(error)) {
+        sortOrderSupportedRef.current = false
+        const retry = await supabase.from("plans").insert(stripSortOrderFromRows(chunk))
+        error = retry.error
+      }
+      if (error) throw error
+    }
+  }
+
+  async function updateRecurringPlanRowById(userId, rowId, payload) {
+    let nextPayload = { ...(payload ?? {}) }
+    if (!endTimeSupportedRef.current) nextPayload = stripEndTimeFromRows([nextPayload])[0]
+    if (!sortOrderSupportedRef.current) nextPayload = stripSortOrderFromRows([nextPayload])[0]
+
+    let { error } = await supabase.from("plans").update(nextPayload).eq("id", rowId).eq("user_id", userId)
+    if (error && isRepeatColumnError(error)) {
+      markRepeatFallbackNotice()
+      throw error
+    }
+    if (error && isEndTimeColumnError(error)) {
+      endTimeSupportedRef.current = false
+      const retry = await supabase
+        .from("plans")
+        .update(stripEndTimeFromRows([nextPayload])[0])
+        .eq("id", rowId)
+        .eq("user_id", userId)
+      error = retry.error
+    }
+    if (error && isSortOrderColumnError(error)) {
+      sortOrderSupportedRef.current = false
+      const retry = await supabase
+        .from("plans")
+        .update(stripSortOrderFromRows([nextPayload])[0])
+        .eq("id", rowId)
+        .eq("user_id", userId)
+      error = retry.error
+    }
+    if (error) throw error
+  }
+
+  async function softDeleteRecurringPlanIds(userId, ids) {
+    const uniqueIds = [...new Set((ids ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))]
+    if (uniqueIds.length === 0) return
+    const deletedAt = new Date().toISOString()
+    const { error } = await supabase
+      .from("plans")
+      .update({ deleted_at: deletedAt, updated_at: deletedAt, client_id: clientIdRef.current })
+      .in("id", uniqueIds)
+      .eq("user_id", userId)
+    if (error) throw error
+  }
+
+  async function createCloudRecurringRule(payload) {
+    if (!canUseWebRowPlanEdit || !supabase || !session?.user?.id) return
+    const userId = session.user.id
+    const rows = buildRecurringPlanRows(userId, payload, { seriesIdOverride: genSeriesId() })
+    if (rows.length === 0) return
+    suspendRemotePlansLoads()
+    try {
+      await insertRecurringPlanRows(rows)
+      ensureWindowsForCategories(
+        new Set(rows.map((row) => normalizeCategoryId(String(row?.category_id ?? "").trim())).filter((title) => title && !isGeneralCategoryId(title)))
+      )
+      await loadRemotePlans(userId, { force: true })
+    } catch (error) {
+      console.error("create recurring rule", error)
+      await loadRemotePlans(userId, { force: true })
+    }
+  }
+
+  async function updateCloudRecurringRuleScoped(payload, scope) {
+    if (!canUseWebRowPlanEdit || !supabase || !session?.user?.id) return
+    const userId = session.user.id
+    const target = recurringModalState?.item
+    if (!target) return
+    const rowId = String(target?.row?.id ?? target?.planId ?? target?.ruleId ?? "").trim()
+    const anchorDateKey = String(target?.dateKey ?? recurringModalState?.dateKey ?? "").trim()
+    const familyId = String(target?.seriesId ?? target?.familyId ?? target?.row?.series_id ?? "").trim()
+    const familyStartDateKey = String(target?.familyStartDateKey ?? anchorDateKey).trim() || anchorDateKey
+    if (!anchorDateKey) return
+
+    suspendRemotePlansLoads()
+    try {
+      if (scope === "single" || !familyId) {
+        if (!rowId) return
+        const nextRow = buildSingleRecurringPlanPayload(userId, payload, anchorDateKey, {
+          seriesIdOverride: null,
+          repeatTypeOverride: "none"
+        })
+        if (!nextRow) return
+        await updateRecurringPlanRowById(userId, rowId, nextRow)
+        await loadRemotePlans(userId, { force: true })
+        return
+      }
+
+      const familyRows = (remotePlans ?? []).filter((row) => {
+        if (!row || row?.deleted_at) return false
+        return String(row?.series_id ?? "").trim() === familyId
+      })
+      const deleteIds = familyRows
+        .filter((row) => (scope === "future" ? String(row?.date ?? "").trim() >= anchorDateKey : true))
+        .map((row) => row?.id)
+        .filter(Boolean)
+
+      await softDeleteRecurringPlanIds(userId, deleteIds)
+
+      const excludedIds = new Set(deleteIds.map((id) => String(id)))
+      const startDateKey = scope === "future" ? anchorDateKey : String(payload?.startDateKey ?? familyStartDateKey).trim() || familyStartDateKey
+      const nextRows = buildRecurringPlanRows(userId, payload, {
+        seriesIdOverride: genSeriesId(),
+        startDateKeyOverride: startDateKey,
+        excludedIds
+      })
+      await insertRecurringPlanRows(nextRows)
+      ensureWindowsForCategories(
+        new Set(nextRows.map((row) => normalizeCategoryId(String(row?.category_id ?? "").trim())).filter((title) => title && !isGeneralCategoryId(title)))
+      )
+      await loadRemotePlans(userId, { force: true })
+    } catch (error) {
+      console.error("update recurring rule", error)
+      await loadRemotePlans(userId, { force: true })
+    }
+  }
+
+  async function deleteCloudRecurringRuleScoped(scope) {
+    if (!canUseWebRowPlanEdit || !supabase || !session?.user?.id) return
+    const userId = session.user.id
+    const target = recurringModalState?.item
+    if (!target) return
+    const rowId = String(target?.row?.id ?? target?.planId ?? target?.ruleId ?? "").trim()
+    const anchorDateKey = String(target?.dateKey ?? recurringModalState?.dateKey ?? "").trim()
+    const familyId = String(target?.seriesId ?? target?.familyId ?? target?.row?.series_id ?? "").trim()
+    if (!anchorDateKey && !rowId) return
+
+    suspendRemotePlansLoads()
+    try {
+      let deleteIds = []
+      if (scope === "single" || !familyId) {
+        deleteIds = rowId ? [rowId] : []
+      } else {
+        deleteIds = (remotePlans ?? [])
+          .filter((row) => {
+            if (!row || row?.deleted_at) return false
+            if (String(row?.series_id ?? "").trim() !== familyId) return false
+            if (scope === "future") return String(row?.date ?? "").trim() >= anchorDateKey
+            return true
+          })
+          .map((row) => row?.id)
+          .filter(Boolean)
+      }
+      await softDeleteRecurringPlanIds(userId, deleteIds)
+      await loadRemotePlans(userId, { force: true })
+    } catch (error) {
+      console.error("delete recurring rule", error)
+      await loadRemotePlans(userId, { force: true })
+    }
+  }
+
+  async function toggleCloudRecurringTask(task) {
+    if (!canUseWebRowPlanEdit || !supabase || !session?.user?.id) return
+    const userId = session.user.id
+    const rowId = String(task?.row?.id ?? task?.planId ?? "").trim()
+    if (!rowId) return
+
+    const currentContent = String(task?.row?.content ?? task?.rawLine ?? "").trim()
+    const parsed = stripTaskSuffix(currentContent)
+    const baseText = String(parsed.text ?? "").trim()
+    if (!baseText || parsed.completed == null) return
+
+    const nextContent = buildPlanContentWithMeta(baseText, {
+      completed: !Boolean(parsed.completed),
+      dday: Boolean(parsed.dday)
+    })
+    const updatedAt = new Date().toISOString()
+
+    setRemotePlans((prev) =>
+      (prev ?? []).map((row) =>
+        String(row?.id ?? "").trim() === rowId
+          ? { ...row, content: nextContent, updated_at: updatedAt, client_id: clientIdRef.current }
+          : row
+      )
+    )
+
+    const { error } = await supabase
+      .from("plans")
+      .update({ content: nextContent, updated_at: updatedAt, client_id: clientIdRef.current })
+      .eq("id", rowId)
+      .eq("user_id", userId)
+
+    if (error) {
+      console.error("toggle recurring task", error)
+      await loadRemotePlans(userId, { force: true })
+    }
+  }
+
   function toggleRecurringTask(task) {
+    if (hasCloudSession) {
+      toggleCloudRecurringTask(task)
+      return
+    }
+
     const ruleId = String(task?.ruleId ?? "").trim()
     const dateKey = String(task?.dateKey ?? "").trim()
     if (!ruleId || !dateKey) return
@@ -5460,7 +6481,7 @@ function stripEmptyGroupLines(bodyText) {
     setActiveDateKey(task.dateKey)
     scrollReadDateIntoView(task.dateKey, "smooth")
     openDayList(task.dateKey, [])
-    setTasksOpen(false)
+    setCollectionOpen(false)
   }
 
   function openDdayItem(item) {
@@ -5475,24 +6496,16 @@ function stripEmptyGroupLines(bodyText) {
     setActiveDateKey(item.dateKey)
     scrollReadDateIntoView(item.dateKey, "smooth")
     openDayList(item.dateKey, itemsByDate[item.dateKey] ?? [])
-    setDdaysOpen(false)
-    setTasksOpen(false)
+    setCollectionOpen(false)
   }
 
-  function toggleTasksPanel() {
-    setTasksOpen((prev) => {
-      const next = !prev
-      if (next) setDdaysOpen(false)
-      return next
-    })
-  }
-
-  function toggleDdaysPanel() {
-    setDdaysOpen((prev) => {
-      const next = !prev
-      if (next) setTasksOpen(false)
-      return next
-    })
+  function toggleCollectionPanel(nextMode = "tasks") {
+    if (collectionOpen && collectionMode === nextMode) {
+      setCollectionOpen(false)
+      return
+    }
+    setCollectionMode(nextMode)
+    setCollectionOpen(true)
   }
 
   function toggleAnyTask(task) {
@@ -5501,6 +6514,7 @@ function stripEmptyGroupLines(bodyText) {
       return
     }
     toggleTextTask(task)
+    persistTextTaskToggle(task)
   }
 
   function openAnyTask(task) {
@@ -5517,7 +6531,7 @@ function stripEmptyGroupLines(bodyText) {
         setActiveDateKey(dateKey)
         scrollReadDateIntoView(dateKey, "smooth")
       }
-      setTasksOpen(false)
+      setCollectionOpen(false)
       openRecurringEdit(task)
       return
     }
@@ -5526,7 +6540,7 @@ function stripEmptyGroupLines(bodyText) {
 
   function buildRecurringRuleFromPayload(payload, fallbackDateKey, familyId = null) {
     const startDateKey = String(payload?.startDateKey ?? fallbackDateKey ?? "").trim()
-    const untilDateKey = String(payload?.untilDateKey ?? startDateKey).trim() || startDateKey
+    const untilDateKey = String(payload?.untilDateKey ?? "").trim()
     return {
       id: genRecurringId("rule"),
       familyId: familyId || genRecurringId("family"),
@@ -5546,11 +6560,19 @@ function stripEmptyGroupLines(bodyText) {
   }
 
   function createRecurringRule(payload) {
+    if (hasCloudSession) {
+      createCloudRecurringRule(payload)
+      return
+    }
     const nextRule = buildRecurringRuleFromPayload(payload, recurringModalState?.dateKey)
     setRecurringRules((prev) => [...(prev ?? []), nextRule])
   }
 
   function updateRecurringRuleScoped(payload, scope) {
+    if (hasCloudSession) {
+      updateCloudRecurringRuleScoped(payload, scope)
+      return
+    }
     const target = recurringModalState?.item
     if (!target) return
     const familyId = String(target.familyId ?? target.ruleId ?? "").trim()
@@ -5601,7 +6623,7 @@ function stripEmptyGroupLines(bodyText) {
             continue
           }
           const ruleStart = String(rule?.startDateKey ?? "").trim()
-          const ruleUntil = String(rule?.untilDateKey ?? ruleStart).trim()
+          const ruleUntil = String(rule?.untilDateKey || ruleStart).trim()
           if (keyToTime(ruleUntil) < keyToTime(anchorDateKey)) {
             kept.push(rule)
             continue
@@ -5650,6 +6672,10 @@ function stripEmptyGroupLines(bodyText) {
   }
 
   function deleteRecurringRuleScoped(scope) {
+    if (hasCloudSession) {
+      deleteCloudRecurringRuleScoped(scope)
+      return
+    }
     const target = recurringModalState?.item
     if (!target) return
     const familyId = String(target.familyId ?? target.ruleId ?? "").trim()
@@ -5692,7 +6718,7 @@ function stripEmptyGroupLines(bodyText) {
             continue
           }
           const ruleStart = String(rule?.startDateKey ?? "").trim()
-          const ruleUntil = String(rule?.untilDateKey ?? ruleStart).trim()
+          const ruleUntil = String(rule?.untilDateKey || ruleStart).trim()
           if (keyToTime(ruleUntil) < keyToTime(anchorDateKey)) {
             kept.push(rule)
             continue
@@ -6026,51 +7052,13 @@ function stripEmptyGroupLines(bodyText) {
           </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          {activeWindowId === "all" && (
-            <div style={{ position: "relative" }}>
-              <button
-                ref={filterBtnRef}
-                onClick={() => setFilterOpen((v) => !v)}
-              style={{
-                ...memoTopRightButton,
-                padding: 0,
-                fontSize: 26,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center"
-              }}
-                title="통합 필터"
-                aria-label="통합 필터"
-              >
-                <span style={{ display: "inline-block", transform: "translateY(-1.5px)" }}>≡</span>
-              </button>
-              {filterOpen && (
-                <FilterPanel
-                  filterPanelRef={filterPanelRef}
-                  editableWindows={editableWindows}
-                  integratedFilters={integratedFilters}
-                  setIntegratedFilters={setIntegratedFilters}
-                  ui={ui}
-                  panelFontFamily={panelFontFamily}
-                />
-              )}
-            </div>
-          )}
           <button
-            onClick={toggleDdaysPanel}
-            title="D-days"
-            aria-label="D-days"
-            style={{ ...memoTopRightButton, fontSize: 12, fontWeight: 900, minWidth: 74 }}
+            onClick={() => toggleCollectionPanel(collectionMode)}
+            title="체크"
+            aria-label="Task와 D-day"
+            style={{ ...memoTopRightButton, fontSize: 18, fontWeight: 900, padding: 0 }}
           >
-            D-days
-          </button>
-          <button
-            onClick={toggleTasksPanel}
-            title="Tasks"
-            aria-label="Tasks"
-            style={{ ...memoTopRightButton, fontSize: 12, fontWeight: 900, minWidth: 74 }}
-          >
-            Tasks
+            ✓
           </button>
           <button
             ref={settingsBtnRef}
@@ -6732,22 +7720,18 @@ function stripEmptyGroupLines(bodyText) {
         </div>
       </div>
 
-      <TasksPanel
-        open={tasksOpen}
+      <CollectionsPanel
+        open={collectionOpen}
+        mode={collectionMode}
+        onModeChange={setCollectionMode}
         ui={ui}
         panelFontFamily={panelFontFamily}
         tasks={allTaskItems}
+        ddays={allDdayItems}
         onToggleTask={toggleAnyTask}
         onOpenTask={openAnyTask}
-        onClose={() => setTasksOpen(false)}
-      />
-      <DdaysPanel
-        open={ddaysOpen}
-        ui={ui}
-        panelFontFamily={panelFontFamily}
-        ddays={allDdayItems}
         onOpenDday={openDdayItem}
-        onClose={() => setDdaysOpen(false)}
+        onClose={() => setCollectionOpen(false)}
       />
 
         <DayListModal

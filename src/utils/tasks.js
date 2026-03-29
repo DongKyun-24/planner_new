@@ -57,6 +57,7 @@ export function extractTasksFromPlannerText(sourceText, baseYear) {
         rawLine,
         baseRaw: parsedTask.baseRaw,
         completed: parsedTask.completed,
+        dday: parsedTask.dday,
         time: formatted.time,
         title: formatted.title,
         text: formatted.text,

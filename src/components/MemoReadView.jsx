@@ -1,11 +1,11 @@
-import { formatDateRangeLabel, getRepeatLabel, parseRecurringRawLine } from "../utils/recurringRules"
+﻿import { formatDateRangeLabel, getRepeatLabel, parseRecurringRawLine } from "../utils/recurringRules"
 
 const TASK_RING_BLUE = "#3b82f6"
 const DDAY_ACCENT = "#f59e0b"
 const TASK_CONTROL_SIZE = 18
-const TASK_ROW_GAP = 6
-const TASK_ROW_PADDING = "3px 0"
-const REGULAR_TASK_TEXT_OFFSET = 4
+const TASK_ROW_GAP = 5
+const TASK_ROW_PADDING = "2px 0"
+const REGULAR_TASK_TEXT_OFFSET = 0
 const REPEAT_META_TEXT_STYLE = {
   display: "inline-flex",
   alignItems: "center",
@@ -20,13 +20,14 @@ const TASK_TEXT_STYLE = {
   minWidth: 0,
   display: "inline-flex",
   alignItems: "center",
+  justifyContent: "center",
   minHeight: 20,
   fontWeight: 500,
-  lineHeight: 1.15
+  lineHeight: 1.2
 }
 const REPEAT_BADGE_STYLE = {
-  height: 18,
-  padding: "0 7px",
+  height: 20,
+  padding: "0 8px",
   borderRadius: 999,
   display: "inline-flex",
   alignItems: "center",
@@ -116,6 +117,10 @@ function DdayRow({ item, ui, onOpen }) {
 function TaskCard({ item, ui, memoFontPx, onTaskToggle, onTaskOpen }) {
   const repeatLabel =
     item?.sourceType === "recurring" ? getRepeatLabel(item?.repeat, item?.repeatInterval) : ""
+  const recurringDateLabel =
+    item?.sourceType === "recurring"
+      ? formatDateRangeLabel(item?.familyStartDateKey, item?.repeatUntilKey ?? item?.familyUntilDateKey)
+      : ""
   const controlSize = getTaskControlSize(memoFontPx)
   const checkFontSize = getTaskCheckFontSize(controlSize)
   return (
@@ -153,9 +158,10 @@ function TaskCard({ item, ui, memoFontPx, onTaskToggle, onTaskOpen }) {
           width: controlSize,
           height: controlSize,
           borderRadius: 999,
-          border: `1.25px solid ${item.completed ? ui.accent : TASK_RING_BLUE}`,
-          background: item.completed ? ui.accent : ui.surface,
-          color: item.completed ? "#fff" : "transparent",
+          border: `1.25px solid ${item.completed ? ui.border : TASK_RING_BLUE}`,
+          background: item.completed ? ui.surface2 : ui.surface,
+          color: item.completed ? ui.text2 : "transparent",
+          opacity: item.completed ? 0.72 : 1,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -166,18 +172,20 @@ function TaskCard({ item, ui, memoFontPx, onTaskToggle, onTaskOpen }) {
           lineHeight: 1,
           padding: 0,
           alignSelf: "center",
+          marginTop: 0,
           margin: 0
         }}
       >
-        ✓
+        {item.completed ? "✓" : ""}
       </button>
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          minHeight: 20,
           minWidth: 0,
-          lineHeight: 1.15
+          minHeight: 20,
+          lineHeight: 1.2,
+          paddingTop: 0
         }}
       >
         <div
@@ -202,12 +210,32 @@ function TaskCard({ item, ui, memoFontPx, onTaskToggle, onTaskOpen }) {
               {repeatLabel}
             </span>
           ) : null}
+          {recurringDateLabel ? (
+            <span
+              style={{
+                fontSize: 11,
+                color: ui.text2,
+                fontWeight: 700,
+                lineHeight: 1,
+                minHeight: 20,
+                display: "inline-flex",
+                alignItems: "center",
+                flexShrink: 0,
+                marginTop: 0
+              }}
+            >
+              {recurringDateLabel}
+            </span>
+          ) : null}
           <span
             style={{
               ...TASK_TEXT_STYLE,
               fontSize: memoFontPx,
               color: item.completed ? ui.text2 : ui.text,
-              textDecoration: item.completed ? "line-through" : "none"
+              opacity: item.completed ? 0.62 : 1,
+              textDecoration: item.completed ? "line-through" : "none",
+              textDecorationColor: item.completed ? ui.text : "transparent",
+              textDecorationThickness: item.completed ? "2px" : undefined
             }}
           >
             {item.display}
@@ -305,7 +333,7 @@ export default function MemoReadView({
   onTaskOpen,
   onRecurringOpen,
   onDdayOpen,
-  emptyText = "빈 메모입니다. 날짜를 눌러 편집해보세요."
+  emptyText = "빈 메모입니다. 날짜를 눌러 일정을 적어보세요."
 }) {
   if (!blocks || blocks.length === 0) {
     return (
@@ -348,7 +376,7 @@ export default function MemoReadView({
               ...item,
               display: parsed.display || item?.display || "",
               repeatLabel: getRepeatLabel(item?.repeat, item?.repeatInterval),
-              dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.familyUntilDateKey)
+              dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.repeatUntilKey ?? item?.familyUntilDateKey)
             }
           })
           .filter((item) => item?.display)
@@ -507,11 +535,15 @@ export default function MemoReadView({
                   height: 24,
                   cursor: "pointer",
                   fontWeight: 900,
-                  lineHeight: 1
+                  fontSize: 14,
+                  lineHeight: 1,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center"
                 }}
                 title={isCollapsed ? "펼치기" : "접기"}
               >
-                {isCollapsed ? "▾" : "▴"}
+                {isCollapsed ? "▸" : "▾"}
               </button>
             </div>
             {!isCollapsed && (
@@ -612,3 +644,4 @@ export default function MemoReadView({
     </>
   )
 }
+

@@ -61,7 +61,7 @@ export default function TasksPanel({
             e.stopPropagation()
             onToggleTask?.(task)
           }}
-          aria-label={task.completed ? "작업을 미완료로 변경" : "작업 완료"}
+          aria-label={task.completed ? "Task 미완료로 변경" : "Task 완료"}
           style={{
             width: 17,
             height: 17,
@@ -81,7 +81,7 @@ export default function TasksPanel({
             alignSelf: "center"
           }}
         >
-          ✓
+          {task.completed ? "✓" : ""}
         </button>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4, justifyContent: "center" }}>
           <div style={{ fontSize: 15, lineHeight: 1.1 }}>
@@ -166,7 +166,7 @@ export default function TasksPanel({
         <div>
           <div style={{ fontSize: 22, fontWeight: 900 }}>Tasks</div>
           <div style={{ fontSize: 12, color: ui.text2, marginTop: 4 }}>
-            날짜 내용 끝에 `;X`를 붙이면 task로, `;O`면 완료로 인식합니다.
+            줄 끝에 `;X` 또는 `;O`가 붙은 항목이 여기 모입니다.
           </div>
         </div>
         <button

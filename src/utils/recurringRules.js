@@ -135,11 +135,11 @@ export function parseRecurringRawLine(rawLine, fallbackTitle = "") {
 export function getRepeatLabel(repeat, repeatInterval = 1) {
   const mode = normalizeRepeatType(repeat)
   const interval = normalizeRepeatInterval(repeatInterval)
-  if (mode === REPEAT_DAILY) return interval === 1 ? "매일" : `매 ${interval}일`
-  if (mode === REPEAT_WEEKLY) return interval === 1 ? "매주" : `매 ${interval}주`
-  if (mode === REPEAT_MONTHLY) return interval === 1 ? "매월" : `매 ${interval}개월`
-  if (mode === REPEAT_YEARLY) return interval === 1 ? "매년" : `매 ${interval}년`
-  return "1회"
+  if (mode === REPEAT_DAILY) return interval === 1 ? "매일" : `${interval}일마다`
+  if (mode === REPEAT_WEEKLY) return interval === 1 ? "매주" : `${interval}주마다`
+  if (mode === REPEAT_MONTHLY) return interval === 1 ? "매월" : `${interval}개월마다`
+  if (mode === REPEAT_YEARLY) return interval === 1 ? "매년" : `${interval}년마다`
+  return "반복 안 함"
 }
 
 export function formatDateRangeLabel(startDateKey, untilDateKey) {
@@ -152,7 +152,8 @@ export function formatDateRangeLabel(startDateKey, untilDateKey) {
 
 export function buildOccurrenceDateKeys(rule, rangeStartKey, rangeEndKey) {
   const startDateKey = String(rule?.startDateKey ?? rule?.start_date ?? "").trim()
-  const untilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? startDateKey).trim()
+  const rawUntilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? "").trim()
+  const untilDateKey = rawUntilDateKey || String(rangeEndKey ?? "").trim() || startDateKey
   const repeat = normalizeRepeatType(rule?.repeat ?? rule?.repeat_type)
   const interval = normalizeRepeatInterval(rule?.repeatInterval ?? rule?.repeat_interval)
   const startMs = keyToTime(startDateKey)
@@ -219,7 +220,7 @@ export function buildOccurrenceDateKeys(rule, rangeStartKey, rangeEndKey) {
 
 function normalizeRule(rule) {
   const startDateKey = String(rule?.startDateKey ?? rule?.start_date ?? "").trim()
-  const untilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? startDateKey).trim() || startDateKey
+  const untilDateKey = String(rule?.untilDateKey ?? rule?.until_date ?? "").trim()
   const repeat = normalizeRepeatType(rule?.repeat ?? rule?.repeat_type)
   const repeatInterval = normalizeRepeatInterval(rule?.repeatInterval ?? rule?.repeat_interval)
   return {
@@ -251,17 +252,19 @@ function normalizeOverride(item) {
 export function buildRecurringByDate(rules, overrides, rangeStartKey, rangeEndKey, categoryFilter = null) {
   const normalizedRules = (Array.isArray(rules) ? rules : []).map(normalizeRule).filter((item) => item.id && item.rawLine)
   const normalizedOverrides = (Array.isArray(overrides) ? overrides : []).map(normalizeOverride).filter((item) => item.ruleId && item.dateKey)
+  const rangeEndFallbackKey = String(rangeEndKey ?? "").trim()
 
   const familyRange = new Map()
   for (const rule of normalizedRules) {
     const familyId = rule.familyId || rule.id
+    const effectiveUntilDateKey = rule.untilDateKey || rangeEndFallbackKey || rule.startDateKey
     const current = familyRange.get(familyId)
     if (!current) {
-      familyRange.set(familyId, { startDateKey: rule.startDateKey, untilDateKey: rule.untilDateKey })
+      familyRange.set(familyId, { startDateKey: rule.startDateKey, untilDateKey: effectiveUntilDateKey })
       continue
     }
     if (keyToTime(rule.startDateKey) < keyToTime(current.startDateKey)) current.startDateKey = rule.startDateKey
-    if (keyToTime(rule.untilDateKey) > keyToTime(current.untilDateKey)) current.untilDateKey = rule.untilDateKey
+    if (keyToTime(effectiveUntilDateKey) > keyToTime(current.untilDateKey)) current.untilDateKey = effectiveUntilDateKey
   }
 
   const overrideMap = new Map()
@@ -297,7 +300,8 @@ export function buildRecurringByDate(rules, overrides, rangeStartKey, rangeEndKe
         createdAt: String(rule.createdAt ?? rule.created_at ?? "").trim(),
         updatedAt: String(rule.updatedAt ?? rule.updated_at ?? "").trim(),
         familyStartDateKey: family.startDateKey,
-        familyUntilDateKey: family.untilDateKey
+        familyUntilDateKey: family.untilDateKey,
+        repeatUntilKey: rule.untilDateKey
       }
       out[dateKey] = (out[dateKey] ?? []).concat(occurrence)
     }

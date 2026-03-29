@@ -5,9 +5,9 @@ import { parseTaskSuffix } from "../utils/taskMarkers"
 const TASK_RING_BLUE = "#3b82f6"
 const DDAY_ACCENT = "#f59e0b"
 const TASK_CONTROL_SIZE = 18
-const TASK_ROW_GAP = 6
-const TASK_ROW_PADDING = "3px 0"
-const REGULAR_TASK_TEXT_OFFSET = 4
+const TASK_ROW_GAP = 5
+const TASK_ROW_PADDING = "2px 0"
+const REGULAR_TASK_TEXT_OFFSET = 0
 const REPEAT_META_TEXT_STYLE = {
   display: "inline-flex",
   alignItems: "center",
@@ -21,13 +21,14 @@ const REPEAT_META_TEXT_STYLE = {
 const TASK_TEXT_STYLE = {
   display: "inline-flex",
   alignItems: "center",
+  justifyContent: "center",
   minHeight: 20,
-  lineHeight: 1.15,
+  lineHeight: 1.2,
   fontWeight: 500
 }
 const REPEAT_BADGE_STYLE = {
-  height: 18,
-  padding: "0 7px",
+  height: 20,
+  padding: "0 8px",
   borderRadius: 999,
   display: "inline-flex",
   alignItems: "center",
@@ -150,6 +151,49 @@ function SectionBox({ ui, empty = false, onClick, children }) {
   )
 }
 
+function AddRecurringRow({ ui, label, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        border: `1px dashed ${ui.border}`,
+        background: ui.surface,
+        color: ui.text2,
+        borderRadius: 10,
+        minHeight: 34,
+        padding: "0 12px",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        cursor: "pointer"
+      }}
+    >
+      <span
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: 999,
+          border: `1px solid ${ui.border}`,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 13,
+          fontWeight: 900,
+          lineHeight: 1,
+          flexShrink: 0,
+          color: ui.text
+        }}
+      >
+        +
+      </span>
+      <span style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2 }}>{label}</span>
+    </button>
+  )
+}
+
 function RecurringScheduleRow({ item, ui, memoFontPx, onOpen }) {
   return (
     <button
@@ -245,9 +289,10 @@ function RecurringTaskRow({ item, ui, memoFontPx, onOpen, onToggle }) {
           width: controlSize,
           height: controlSize,
           borderRadius: 999,
-          border: `1.25px solid ${item.completed ? ui.accent : TASK_RING_BLUE}`,
-          background: item.completed ? ui.accent : ui.surface,
-          color: item.completed ? "#fff" : "transparent",
+          border: `1.25px solid ${item.completed ? ui.border : TASK_RING_BLUE}`,
+          background: item.completed ? ui.surface2 : ui.surface,
+          color: item.completed ? ui.text2 : "transparent",
+          opacity: item.completed ? 0.72 : 1,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -258,10 +303,12 @@ function RecurringTaskRow({ item, ui, memoFontPx, onOpen, onToggle }) {
           lineHeight: 1,
           padding: 0,
           alignSelf: "center",
+          marginTop: 0,
           margin: 0
         }}
       >
-        ??      </button>
+        {item.completed ? "✓" : ""}
+      </button>
       <span
         style={{
           ...REPEAT_BADGE_STYLE,
@@ -281,7 +328,11 @@ function RecurringTaskRow({ item, ui, memoFontPx, onOpen, onToggle }) {
           minWidth: 0,
           fontSize: memoFontPx,
           color: item.completed ? ui.text2 : ui.text,
-          textDecoration: item.completed ? "line-through" : "none"
+          opacity: item.completed ? 0.62 : 1,
+          textDecoration: item.completed ? "line-through" : "none",
+          textDecorationColor: item.completed ? ui.text : "transparent",
+          textDecorationThickness: item.completed ? "2px" : undefined,
+          alignItems: "center"
         }}
       >
         {item.display}
@@ -470,7 +521,7 @@ export default function DayListModal({
           ...item,
           display: parsed.display || item?.display || "",
           repeatLabel: getRepeatLabel(item?.repeat, item?.repeatInterval),
-          dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.familyUntilDateKey)
+          dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.repeatUntilKey ?? item?.familyUntilDateKey)
         }
       })
       .filter((item) => item?.display)
@@ -489,7 +540,7 @@ export default function DayListModal({
         .map((item) => ({
           ...item,
           repeatLabel: getRepeatLabel(item?.repeat, item?.repeatInterval),
-          dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.familyUntilDateKey)
+          dateLabel: formatDateRangeLabel(item?.familyStartDateKey, item?.repeatUntilKey ?? item?.familyUntilDateKey)
         })),
     [taskCards]
   )
@@ -920,15 +971,18 @@ export default function DayListModal({
                     반복일정을 추가하려면 이 영역을 누르세요.
                   </div>
                 ) : (
-                  recurringScheduleCards.map((item) => (
-                    <RecurringScheduleRow
-                      key={`day-recurring-edit-${item.id}`}
-                      item={item}
-                      ui={ui}
-                      memoFontPx={memoFontPx}
-                      onOpen={onRecurringSelect}
-                    />
-                  ))
+                  <>
+                    {recurringScheduleCards.map((item) => (
+                      <RecurringScheduleRow
+                        key={`day-recurring-edit-${item.id}`}
+                        item={item}
+                        ui={ui}
+                        memoFontPx={memoFontPx}
+                        onOpen={onRecurringSelect}
+                      />
+                    ))}
+                    <AddRecurringRow ui={ui} label="반복 일정 추가" onClick={() => onRecurringCreate?.("schedule")} />
+                  </>
                 )}
               </SectionBox>
               <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1001,16 +1055,19 @@ export default function DayListModal({
                     반복 Task를 추가하려면 이 영역을 누르세요.
                   </div>
                 ) : (
-                  recurringTaskCards.map((item) => (
-                    <RecurringTaskRow
-                      key={`day-recurring-task-edit-${item.id}`}
-                      item={item}
-                      ui={ui}
-                      memoFontPx={memoFontPx}
-                      onOpen={onRecurringSelect}
-                      onToggle={onTaskToggle}
-                    />
-                  ))
+                  <>
+                    {recurringTaskCards.map((item) => (
+                      <RecurringTaskRow
+                        key={`day-recurring-task-edit-${item.id}`}
+                        item={item}
+                        ui={ui}
+                        memoFontPx={memoFontPx}
+                        onOpen={onRecurringSelect}
+                        onToggle={onTaskToggle}
+                      />
+                    ))}
+                    <AddRecurringRow ui={ui} label="반복 Task 추가" onClick={() => onRecurringCreate?.("task")} />
+                  </>
                 )}
               </SectionBox>
             </div>
@@ -1079,15 +1136,18 @@ export default function DayListModal({
                   반복일정을 추가하려면 이 영역을 누르세요.
                 </div>
               ) : (
-                recurringScheduleCards.map((item) => (
-                  <RecurringScheduleRow
-                    key={`day-recurring-read-${item.id}`}
-                    item={item}
-                    ui={ui}
-                    memoFontPx={memoFontPx}
-                    onOpen={onRecurringSelect}
-                  />
-                ))
+                <>
+                  {recurringScheduleCards.map((item) => (
+                    <RecurringScheduleRow
+                      key={`day-recurring-read-${item.id}`}
+                      item={item}
+                      ui={ui}
+                      memoFontPx={memoFontPx}
+                      onOpen={onRecurringSelect}
+                    />
+                  ))}
+                  <AddRecurringRow ui={ui} label="반복 일정 추가" onClick={() => onRecurringCreate?.("schedule")} />
+                </>
               )}
             </SectionBox>
             <div style={{ fontSize: 12, fontWeight: 800, color: ui.text2 }}>Task</div>
@@ -1136,9 +1196,10 @@ export default function DayListModal({
                     width: taskControlSize,
                     height: taskControlSize,
                     borderRadius: 999,
-                    border: `1.25px solid ${item.completed ? ui.accent : TASK_RING_BLUE}`,
-                    background: item.completed ? ui.accent : ui.surface,
-                    color: item.completed ? "#fff" : "transparent",
+                    border: `1.25px solid ${item.completed ? ui.border : TASK_RING_BLUE}`,
+                    background: item.completed ? ui.surface2 : ui.surface,
+                    color: item.completed ? ui.text2 : "transparent",
+                    opacity: item.completed ? 0.72 : 1,
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -1149,17 +1210,20 @@ export default function DayListModal({
                     lineHeight: 1,
                     padding: 0,
                     alignSelf: "center",
+                    marginTop: 0,
                     margin: 0
                   }}
                 >
-                  ??                </button>
+                  {item.completed ? "✓" : ""}
+                </button>
                 <div
                   style={{
                     display: "flex",
                     alignItems: "center",
-                    minHeight: 20,
                     minWidth: 0,
-                    lineHeight: 1.15,
+                    minHeight: 20,
+                    lineHeight: 1.2,
+                    paddingTop: 0,
                     paddingLeft: REGULAR_TASK_TEXT_OFFSET
                   }}
                 >
@@ -1168,7 +1232,10 @@ export default function DayListModal({
                       ...TASK_TEXT_STYLE,
                       fontSize: memoFontPx,
                       color: item.completed ? ui.text2 : ui.text,
-                      textDecoration: item.completed ? "line-through" : "none"
+                      opacity: item.completed ? 0.62 : 1,
+                      textDecoration: item.completed ? "line-through" : "none",
+                      textDecorationColor: item.completed ? ui.text : "transparent",
+                      textDecorationThickness: item.completed ? "2px" : undefined
                     }}
                   >
                     {item.display}
@@ -1187,16 +1254,19 @@ export default function DayListModal({
                   반복 Task를 추가하려면 이 영역을 누르세요.
                 </div>
               ) : (
-                recurringTaskCards.map((item) => (
-                  <RecurringTaskRow
-                    key={`day-recurring-task-read-${item.id}`}
-                    item={item}
-                    ui={ui}
-                    memoFontPx={memoFontPx}
-                    onOpen={onRecurringSelect}
-                    onToggle={onTaskToggle}
-                  />
-                ))
+                <>
+                  {recurringTaskCards.map((item) => (
+                    <RecurringTaskRow
+                      key={`day-recurring-task-read-${item.id}`}
+                      item={item}
+                      ui={ui}
+                      memoFontPx={memoFontPx}
+                      onOpen={onRecurringSelect}
+                      onToggle={onTaskToggle}
+                    />
+                  ))}
+                  <AddRecurringRow ui={ui} label="반복 Task 추가" onClick={() => onRecurringCreate?.("task")} />
+                </>
               )}
             </SectionBox>
           </div>
@@ -1205,3 +1275,4 @@ export default function DayListModal({
     </div>
   )
 }
+

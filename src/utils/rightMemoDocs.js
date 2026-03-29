@@ -12,8 +12,31 @@ function genRightMemoDocId() {
   return `rmd-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function buildUntitledRightMemoDocTitle(sequence = 1) {
+  const nextSequence = Number(sequence);
+  if (!Number.isFinite(nextSequence) || nextSequence <= 1) return UNTITLED_RIGHT_MEMO_DOC_TITLE;
+  return `${UNTITLED_RIGHT_MEMO_DOC_TITLE} ${Math.floor(nextSequence)}`;
+}
+
+function parseUntitledRightMemoDocSequence(title) {
+  const trimmed = String(title ?? "").trim();
+  if (!trimmed) return null;
+  if (trimmed === UNTITLED_RIGHT_MEMO_DOC_TITLE) return 1;
+  let match = trimmed.match(/^새 메모\s+(\d+)$/);
+  if (match) {
+    const sequence = Number(match[1] ?? NaN);
+    return Number.isFinite(sequence) && sequence >= 2 ? sequence : 1;
+  }
+  match = trimmed.match(/^메모\s+(\d+)$/);
+  if (match) {
+    const sequence = Number(match[1] ?? NaN);
+    return Number.isFinite(sequence) && sequence >= 2 ? sequence : 2;
+  }
+  return null;
+}
+
 function getFallbackTitle(index = 0) {
-  return index === 0 ? DEFAULT_RIGHT_MEMO_DOC_TITLE : `메모 ${index + 1}`;
+  return index === 0 ? DEFAULT_RIGHT_MEMO_DOC_TITLE : buildUntitledRightMemoDocTitle(index);
 }
 
 function normalizeTitle(value, fallback = "") {
@@ -159,6 +182,34 @@ export function createRightMemoDoc(input = {}) {
     title: normalizeTitle(input?.title, UNTITLED_RIGHT_MEMO_DOC_TITLE),
     content: String(input?.content ?? "")
   };
+}
+
+export function getNextRightMemoDocTitle(docs) {
+  const used = new Set(
+    (Array.isArray(docs) ? docs : [])
+      .map((doc, index) => parseUntitledRightMemoDocSequence(getRightMemoDocDisplayTitle(doc?.title, index)))
+      .filter((value) => value != null)
+  );
+  if (!used.has(1)) return buildUntitledRightMemoDocTitle(1);
+  let n = 2;
+  while (used.has(n)) n += 1;
+  return buildUntitledRightMemoDocTitle(n);
+}
+
+export function hasPersistableRightMemoState(rawContent) {
+  const state = normalizeRightMemoDocState(rawContent);
+  const docs = Array.isArray(state?.docs) && state.docs.length > 0
+    ? state.docs.map((doc, index) => normalizeDoc(doc, index))
+    : [normalizeDoc({}, 0)];
+
+  if (docs.length > 1) return true;
+
+  const firstDoc = docs[0];
+  if (!firstDoc) return false;
+  if (String(firstDoc.content ?? "").trim()) return true;
+
+  const title = String(firstDoc.title ?? "").trim();
+  return title !== "" && title !== getFallbackTitle(0);
 }
 
 export function buildRightMemoCombinedText(rawContent) {

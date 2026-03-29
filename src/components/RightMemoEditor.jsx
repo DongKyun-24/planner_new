@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_RIGHT_MEMO_DOC_TITLE,
   createRightMemoDoc,
+  getNextRightMemoDocTitle,
   getRightMemoDocDisplayTitle,
   normalizeRightMemoDocState,
   serializeRightMemoDocState
@@ -42,14 +43,6 @@ function buildSafeDocs(rawDocs) {
     title: getRightMemoDocDisplayTitle(doc?.title, index),
     content: String(doc?.content ?? "")
   }));
-}
-
-function getNextDocTitle(docs) {
-  const used = new Set((docs || []).map((doc, index) => getRightMemoDocDisplayTitle(doc.title, index)));
-  if (!used.has("새 메모")) return "새 메모";
-  let n = 2;
-  while (used.has(`새 메모 ${n}`)) n += 1;
-  return `새 메모 ${n}`;
 }
 
 function Arrow({ left = false, size = 16 }) {
@@ -349,7 +342,7 @@ function TabsChrome({
         onClick={() => viewportRef.current?.scrollBy({ left: -shiftAmount, behavior: "smooth" })}
         disabled={!canMoveLeft}
         style={getToolbarButtonStyle(ui, !canMoveLeft)}
-        ariaLabel="왼쪽 메모 보기"
+        ariaLabel="?쇱そ 硫붾え 蹂닿린"
       >
         <Arrow left size={Math.max(ui.memoFontPx, 12)} />
       </PlainButton>
@@ -498,7 +491,7 @@ function TabsChrome({
         onClick={() => viewportRef.current?.scrollBy({ left: shiftAmount, behavior: "smooth" })}
         disabled={!canMoveRight}
         style={getToolbarButtonStyle(ui, !canMoveRight)}
-        ariaLabel="오른쪽 메모 보기"
+        ariaLabel="?ㅻⅨ履?硫붾え 蹂닿린"
       >
         <Arrow size={Math.max(ui.memoFontPx, 12)} />
       </PlainButton>
@@ -506,7 +499,7 @@ function TabsChrome({
       <PlainButton
         onClick={onAddDoc}
         style={getToolbarButtonStyle(ui)}
-        ariaLabel="새 메모 추가"
+        ariaLabel="??硫붾え 異붽?"
       >
         <span style={{ fontSize: Math.max(ui.memoFontPx, 12), lineHeight: 1 }}>+</span>
       </PlainButton>
@@ -811,7 +804,7 @@ function IntegratedMemoEditor({
               commitDocs(currentGroup.windowId, nextDocs, nextActiveIndex);
             }}
             onAddDoc={() => {
-              const nextDoc = createRightMemoDoc({ title: getNextDocTitle(currentDocs), content: "" });
+              const nextDoc = createRightMemoDoc({ title: getNextRightMemoDocTitle(currentDocs), content: "" });
               const nextDocs = [...currentDocs, nextDoc];
               commitDocs(currentGroup.windowId, nextDocs, nextDocs.length - 1);
             }}
@@ -895,16 +888,23 @@ export default function RightMemoEditor({
   const renameInputRef = useRef(null);
 
   const commitDocs = useCallback(
-    (nextDocs, nextActiveIndex) => {
+    (nextDocs, nextActiveIndex, options = {}) => {
       const safeDocs = buildSafeDocs(nextDocs);
       const safeActiveIndex = Math.max(0, Math.min(nextActiveIndex ?? 0, safeDocs.length - 1));
+      const activeDocId = safeDocs[safeActiveIndex]?.id ?? safeDocs[0]?.id ?? null;
       const nextRaw = serializeRightMemoDocState({
         docs: safeDocs,
-        activeDocId: safeDocs[safeActiveIndex]?.id ?? safeDocs[0]?.id ?? null
+        activeDocId
       });
       setRightMemoText(nextRaw);
+      if (options.persistImmediately) {
+        onSaveMemoState?.(activeWindowId, {
+          docs: safeDocs,
+          activeDocId
+        });
+      }
     },
-    [setRightMemoText]
+    [activeWindowId, onSaveMemoState, setRightMemoText]
   );
 
   useEffect(() => {
@@ -931,7 +931,7 @@ export default function RightMemoEditor({
       const nextDocs = docs.map((doc) =>
         doc.id === docId ? { ...doc, title: nextTitle } : doc
       );
-      commitDocs(nextDocs, activeIndex);
+      commitDocs(nextDocs, activeIndex, { persistImmediately: true });
       setRenameDocId(null);
       setRenameDraft("");
     },
@@ -1001,19 +1001,19 @@ export default function RightMemoEditor({
         }}
         onSelectDoc={(docId) => {
           const nextIndex = docs.findIndex((doc) => doc.id === docId);
-          if (nextIndex >= 0) commitDocs(docs, nextIndex);
+          if (nextIndex >= 0) commitDocs(docs, nextIndex, { persistImmediately: true });
         }}
         onDeleteDoc={(docId) => {
           const docIndex = docs.findIndex((doc) => doc.id === docId);
           if (docIndex < 0 || !canDeleteMemoDoc(docIndex)) return;
           const nextDocs = docs.filter((doc) => doc.id !== docId);
           const nextActiveIndex = docIndex < activeIndex ? activeIndex - 1 : activeIndex;
-          commitDocs(nextDocs, nextActiveIndex);
+          commitDocs(nextDocs, nextActiveIndex, { persistImmediately: true });
         }}
         onAddDoc={() => {
-          const nextDoc = createRightMemoDoc({ title: getNextDocTitle(docs), content: "" });
+          const nextDoc = createRightMemoDoc({ title: getNextRightMemoDocTitle(docs), content: "" });
           const nextDocs = [...docs, nextDoc];
-          commitDocs(nextDocs, nextDocs.length - 1);
+          commitDocs(nextDocs, nextDocs.length - 1, { persistImmediately: true });
         }}
       />
 
@@ -1038,3 +1038,4 @@ export default function RightMemoEditor({
     </div>
   );
 }
+
