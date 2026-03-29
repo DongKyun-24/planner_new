@@ -1,6 +1,7 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import CalendarPanel from "./components/CalendarPanel"
 import DayListModal from "./components/DayListModal"
+import DdaysPanel from "./components/DdaysPanel"
 import DeleteConfirmModal from "./components/DeleteConfirmModal"
 import FilterPanel from "./components/FilterPanel"
 import MemoEditor from "./components/MemoEditor"
@@ -114,6 +115,17 @@ function getClientId() {
   } catch {
     return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`
   }
+}
+
+function compareDdayItems(a, b) {
+  const dayDiff = (a?.daysLeft ?? 0) - (b?.daysLeft ?? 0)
+  if (dayDiff !== 0) return dayDiff
+  const timeA = String(a?.time ?? "")
+  const timeB = String(b?.time ?? "")
+  if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
+  if (timeA && !timeB) return -1
+  if (!timeA && timeB) return 1
+  return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
 }
 
 function App() {
@@ -374,6 +386,7 @@ function App() {
   const [recurringRules, setRecurringRules] = useState(() => loadRecurringList(OFFLINE_RECURRING_RULES_KEY))
   const [recurringOverrides, setRecurringOverrides] = useState(() => loadRecurringList(OFFLINE_RECURRING_OVERRIDES_KEY))
   const [recurringModalState, setRecurringModalState] = useState(null)
+  const [ddaysOpen, setDdaysOpen] = useState(false)
   const [tasksOpen, setTasksOpen] = useState(false)
 
   const [text, setText] = useState("")
@@ -3453,6 +3466,14 @@ function stripEmptyGroupLines(bodyText) {
       }),
     [tasksSourceText, baseYear, todayKey, activeWindowId, allowedDashboardGroupTitles]
   )
+  const panelTextDdayItems = useMemo(
+    () =>
+      extractUpcomingDdaysFromPlannerText(tasksSourceText, baseYear, todayKey, {
+        maxDays: 3650,
+        allowedTitles: activeWindowId === "all" ? allowedDashboardGroupTitles : null
+      }),
+    [tasksSourceText, baseYear, todayKey, activeWindowId, allowedDashboardGroupTitles]
+  )
   const textTasks = useMemo(() => extractTasksFromPlannerText(tasksSourceText, baseYear), [tasksSourceText, baseYear])
   const textTasksByDate = useMemo(() => {
     const map = {}
@@ -3554,7 +3575,7 @@ function stripEmptyGroupLines(bodyText) {
         }),
     [combinedTaskItemsByDate]
   )
-  const recurringDdayItems = useMemo(() => {
+  const buildRecurringDdayItems = useCallback((maxDays = 10) => {
     const todayMs = keyToTime(String(todayKey ?? "").trim())
     if (!Number.isFinite(todayMs)) return []
 
@@ -3563,7 +3584,7 @@ function stripEmptyGroupLines(bodyText) {
       const dateMs = keyToTime(String(dateKey ?? "").trim())
       if (!Number.isFinite(dateMs)) continue
       const daysLeft = Math.round((dateMs - todayMs) / (24 * 60 * 60 * 1000))
-      if (daysLeft < 0 || daysLeft > 10) continue
+      if (daysLeft < 0 || daysLeft > maxDays) continue
 
       for (const item of Array.isArray(recurringItems) ? recurringItems : []) {
         const parsed = parseRecurringRawLine(item?.rawLine, item?.title ?? "")
@@ -3587,6 +3608,8 @@ function stripEmptyGroupLines(bodyText) {
           isTask: Boolean(parsed.isTask),
           isRecurring: true,
           sourceType: "recurring",
+          repeat: item?.repeat,
+          repeatInterval: item?.repeatInterval,
           time: parsed.time,
           title: parsed.title,
           text: parsed.text,
@@ -3615,32 +3638,26 @@ function stripEmptyGroupLines(bodyText) {
       }
     }
 
-    return [...byFamily.values()].sort((a, b) => {
-      const dayDiff = (a?.daysLeft ?? 0) - (b?.daysLeft ?? 0)
-      if (dayDiff !== 0) return dayDiff
-      const timeA = String(a?.time ?? "")
-      const timeB = String(b?.time ?? "")
-      if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
-      if (timeA && !timeB) return -1
-      if (!timeA && timeB) return 1
-      return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
-    })
+    return [...byFamily.values()].sort(compareDdayItems)
   }, [recurringItemsByDate, todayKey, activeWindowId, allowedDashboardGroupTitles])
+  const recurringDdayItems = useMemo(() => {
+    return buildRecurringDdayItems(10)
+  }, [buildRecurringDdayItems])
+  const panelRecurringDdayItems = useMemo(
+    () => buildRecurringDdayItems(3650),
+    [buildRecurringDdayItems]
+  )
   const todayDdayItems = useMemo(
     () =>
-      [...(Array.isArray(textDdayItems) ? textDdayItems : []), ...(Array.isArray(recurringDdayItems) ? recurringDdayItems : [])].sort(
-        (a, b) => {
-          const dayDiff = (a?.daysLeft ?? 0) - (b?.daysLeft ?? 0)
-          if (dayDiff !== 0) return dayDiff
-          const timeA = String(a?.time ?? "")
-          const timeB = String(b?.time ?? "")
-          if (timeA && timeB && timeA !== timeB) return timeA.localeCompare(timeB)
-          if (timeA && !timeB) return -1
-          if (!timeA && timeB) return 1
-          return String(a?.display ?? "").localeCompare(String(b?.display ?? ""), "ko")
-        }
-      ),
+      [...(Array.isArray(textDdayItems) ? textDdayItems : []), ...(Array.isArray(recurringDdayItems) ? recurringDdayItems : [])].sort(compareDdayItems),
     [textDdayItems, recurringDdayItems]
+  )
+  const allDdayItems = useMemo(
+    () =>
+      [...(Array.isArray(panelTextDdayItems) ? panelTextDdayItems : []), ...(Array.isArray(panelRecurringDdayItems) ? panelRecurringDdayItems : [])].sort(
+        compareDdayItems
+      ),
+    [panelTextDdayItems, panelRecurringDdayItems]
   )
 
   const dashboardByDate = useMemo(() => {
@@ -5458,7 +5475,24 @@ function stripEmptyGroupLines(bodyText) {
     setActiveDateKey(item.dateKey)
     scrollReadDateIntoView(item.dateKey, "smooth")
     openDayList(item.dateKey, itemsByDate[item.dateKey] ?? [])
+    setDdaysOpen(false)
     setTasksOpen(false)
+  }
+
+  function toggleTasksPanel() {
+    setTasksOpen((prev) => {
+      const next = !prev
+      if (next) setDdaysOpen(false)
+      return next
+    })
+  }
+
+  function toggleDdaysPanel() {
+    setDdaysOpen((prev) => {
+      const next = !prev
+      if (next) setTasksOpen(false)
+      return next
+    })
   }
 
   function toggleAnyTask(task) {
@@ -6023,7 +6057,15 @@ function stripEmptyGroupLines(bodyText) {
             </div>
           )}
           <button
-            onClick={() => setTasksOpen((prev) => !prev)}
+            onClick={toggleDdaysPanel}
+            title="D-days"
+            aria-label="D-days"
+            style={{ ...memoTopRightButton, fontSize: 12, fontWeight: 900, minWidth: 74 }}
+          >
+            D-days
+          </button>
+          <button
+            onClick={toggleTasksPanel}
             title="Tasks"
             aria-label="Tasks"
             style={{ ...memoTopRightButton, fontSize: 12, fontWeight: 900, minWidth: 74 }}
@@ -6698,6 +6740,14 @@ function stripEmptyGroupLines(bodyText) {
         onToggleTask={toggleAnyTask}
         onOpenTask={openAnyTask}
         onClose={() => setTasksOpen(false)}
+      />
+      <DdaysPanel
+        open={ddaysOpen}
+        ui={ui}
+        panelFontFamily={panelFontFamily}
+        ddays={allDdayItems}
+        onOpenDday={openDdayItem}
+        onClose={() => setDdaysOpen(false)}
       />
 
         <DayListModal
