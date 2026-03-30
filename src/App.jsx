@@ -102,7 +102,7 @@ const OFFLINE_RECURRING_OVERRIDES_KEY = "planner-recurring-overrides-offline-v1"
 const USER_RECURRING_RULES_KEY_PREFIX = "planner-recurring-rules-user-v1"
 const USER_RECURRING_OVERRIDES_KEY_PREFIX = "planner-recurring-overrides-user-v1"
 const USER_RECURRING_CLOUD_MIGRATION_KEY_PREFIX = "planner-recurring-cloud-migrated-v1"
-const OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS = 400
+const OPEN_ENDED_REPEAT_LOOKAHEAD_DAYS = 730
 
 function getClientId() {
   if (typeof window === "undefined") return "server"
