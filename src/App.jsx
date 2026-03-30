@@ -1591,7 +1591,7 @@ function App() {
       return
     }
 
-    const currentRowsFiltered = (data ?? []).filter((row) => !isRecurringPlanRow(row))
+    const currentRowsFiltered = (currentRows ?? []).filter((row) => !isRecurringPlanRow(row))
     const currentMap = new Map()
     const duplicateRows = []
     for (const row of currentRowsFiltered) {
